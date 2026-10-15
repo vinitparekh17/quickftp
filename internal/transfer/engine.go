@@ -41,6 +41,8 @@ type Engine struct {
 	DB                     *storage.DB
 	Client                 Client
 	RemoteRoot, BackupRoot string
+	OnPhase                func(string)
+	OnLog                  func(string, string)
 	// A non-empty page opts into the ASP.NET Core on IIS offline-file lifecycle.
 	IISOfflinePage   string
 	IISShutdownDelay time.Duration
@@ -83,7 +85,8 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 		}
 	}()
 	fail := func(phase string, cause error) (int64, error) {
-		_ = e.DB.SetDeploymentPhase(id, phase)
+		e.setPhase(id, phase)
+		// Keep cancelled runs in the recoverable failed state so rollback remains available.
 		_ = e.DB.FinishDeployment(id, "failed", cause.Error())
 		return id, cause
 	}
@@ -112,16 +115,28 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 		files[i] = prepared{Artifact: a, relative: rel, digest: digest, size: size}
 	}
 	// Snapshot every currently deployed file before touching the remote tree.
-	_ = e.DB.SetDeploymentPhase(id, "backup")
+	e.setPhase(id, "discover")
 	remote, err := e.Client.List(ctx, e.RemoteRoot)
 	if err != nil {
 		return fail("backup", fmt.Errorf("list remote root: %w", err))
 	}
 	backed := map[string]bool{}
+	e.setPhase(id, "backup")
+	backupTotal := 0
 	for _, rf := range remote {
+		if !rf.IsDir {
+			backupTotal++
+		}
+	}
+	backupDone := 0
+	for _, rf := range remote {
+		if err := ctx.Err(); err != nil {
+			return fail("backup", err)
+		}
 		if rf.IsDir {
 			continue
 		}
+		backupDone++
 		rel, err := remoteRelative(e.RemoteRoot, rf.Path)
 		if err != nil {
 			return fail("backup", err)
@@ -146,6 +161,7 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 			_ = e.DB.JournalFile(id, rel, "backup", "failed", rf.Size, "", err.Error())
 			return fail("backup", fmt.Errorf("backup %s: %w", rel, err))
 		}
+		e.setPhase(id, "verify_backup")
 		backupHash, backupSize, hashErr := hashFile(dst)
 		if hashErr != nil || backupSize != rf.Size {
 			if hashErr == nil {
@@ -156,7 +172,11 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 		if err = e.DB.JournalFile(id, rel, "backup", "verified", backupSize, backupHash, ""); err != nil {
 			return fail("backup", err)
 		}
+		e.log("stdout", fmt.Sprintf("Backup verified %s (%d/%d, %d bytes)", rel, backupDone, backupTotal, backupSize))
 		backed[rel] = true
+	}
+	if err := ctx.Err(); err != nil {
+		return fail("backup", err)
 	}
 	if e.IISOfflinePage != "" {
 		if backed["app_offline.htm"] {
@@ -189,13 +209,18 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 		}
 	}
 	// Upload each artifact to a unique staging name, then atomically rename it.
-	_ = e.DB.SetDeploymentPhase(id, "upload")
-	for _, f := range files {
+	e.setPhase(id, "upload")
+	uploadBytes := int64(0)
+	for i, f := range files {
+		if err := ctx.Err(); err != nil {
+			return fail("upload", err)
+		}
 		target := remoteJoin(e.RemoteRoot, f.relative)
 		tmp := target + fmt.Sprintf(".quickftp-%d.tmp", id)
 		if err := e.DB.JournalFile(id, f.relative, "upload", "pending", f.size, f.digest, ""); err != nil {
 			return fail("upload", err)
 		}
+		e.log("stdout", fmt.Sprintf("Uploading %s (%d/%d, %d bytes)", f.relative, i+1, len(files), f.size))
 		src, err := os.Open(f.LocalPath)
 		if err != nil {
 			return fail("upload", err)
@@ -216,6 +241,9 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 			}
 			return fail("upload", fmt.Errorf("verify %s: %w", f.relative, err))
 		}
+		if err := ctx.Err(); err != nil {
+			return fail("upload", err)
+		}
 		if backed[f.relative] {
 			// The previous version is safely backed up and the staged version verified.
 			// Remove the old target before promotion because RNTO replacement is not
@@ -234,6 +262,9 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 					return fail("upload", fmt.Errorf("replace %s outcome unresolved: %w", f.relative, err))
 				}
 			}
+			if err := ctx.Err(); err != nil {
+				return fail("upload", err)
+			}
 		}
 		if err = e.Client.Rename(ctx, tmp, target); err != nil { // Reconcile rename outcome before recording failure.
 			ok, checkErr := e.remoteMatches(ctx, target, f.digest)
@@ -241,6 +272,7 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 				return fail("upload", fmt.Errorf("promote %s outcome unresolved: %w", f.relative, err))
 			}
 		}
+		e.setPhase(id, "verify_upload")
 		ok, err = e.remoteMatches(ctx, target, f.digest)
 		if err != nil || !ok {
 			if err == nil {
@@ -251,10 +283,15 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 		if err = e.DB.JournalFile(id, f.relative, "upload", "verified", f.size, f.digest, ""); err != nil {
 			return fail("upload", err)
 		}
+		uploadBytes += f.size
+		e.log("success", fmt.Sprintf("Upload verified %s (%d/%d, %d/%d bytes)", f.relative, i+1, len(files), uploadBytes, totalArtifactBytes(files)))
 	}
 	// Delete stale files only after all new artifacts are backed up and verified.
-	_ = e.DB.SetDeploymentPhase(id, "delete")
+	e.setPhase(id, "delete")
 	for _, rf := range remote {
+		if err := ctx.Err(); err != nil {
+			return fail("delete", err)
+		}
 		if rf.IsDir {
 			continue
 		}
@@ -268,6 +305,7 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 		if !backed[rel] {
 			return fail("delete", fmt.Errorf("refusing to delete %s without a verified backup", rel))
 		}
+		e.log("stdout", "Removing stale remote file "+rel)
 		if err = e.Client.Delete(ctx, rf.Path); err != nil { // If the file is gone, the command likely succeeded; otherwise preserve the failure for recovery.
 			listing, listErr := e.Client.List(ctx, path.Dir(rf.Path))
 			exists := false
@@ -287,10 +325,31 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 			return fail("delete", err)
 		}
 	}
+	e.setPhase(id, "complete")
 	if err = e.DB.FinishDeployment(id, "completed", ""); err != nil {
 		return id, err
 	}
 	return id, nil
+}
+
+func (e *Engine) setPhase(id int64, phase string) {
+	_ = e.DB.SetDeploymentPhase(id, phase)
+	if e.OnPhase != nil {
+		e.OnPhase(phase)
+	}
+}
+
+func (e *Engine) log(stream, line string) {
+	if e.OnLog != nil {
+		e.OnLog(stream, line)
+	}
+}
+func totalArtifactBytes(files []prepared) int64 {
+	var total int64
+	for _, f := range files {
+		total += f.size
+	}
+	return total
 }
 
 // Rollback restores the last verified remote snapshot for a failed or interrupted deployment.

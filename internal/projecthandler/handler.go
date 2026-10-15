@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -129,7 +130,7 @@ func prepare(ctx context.Context, p Project, log LogFunc) ([]Artifact, error) {
 func matchesRules(name string, rules artifactRules) (bool, error) {
 	included := len(rules.Include) == 0
 	for _, pattern := range rules.Include {
-		match, err := filepath.Match(filepath.FromSlash(pattern), filepath.FromSlash(name))
+		match, err := matchArtifactPattern(name, pattern)
 		if err != nil {
 			return false, fmt.Errorf("invalid artifact include pattern %q: %w", pattern, err)
 		}
@@ -141,7 +142,7 @@ func matchesRules(name string, rules artifactRules) (bool, error) {
 		return false, nil
 	}
 	for _, pattern := range rules.Exclude {
-		match, err := filepath.Match(filepath.FromSlash(pattern), filepath.FromSlash(name))
+		match, err := matchArtifactPattern(name, pattern)
 		if err != nil {
 			return false, fmt.Errorf("invalid artifact exclude pattern %q: %w", pattern, err)
 		}
@@ -150,6 +151,36 @@ func matchesRules(name string, rules artifactRules) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// matchArtifactPattern supports ** as a whole path segment for recursive directory selection.
+func matchArtifactPattern(name, pattern string) (bool, error) {
+	nameParts := strings.Split(path.Clean(filepath.ToSlash(name)), "/")
+	patternParts := strings.Split(path.Clean(strings.ReplaceAll(pattern, "\\", "/")), "/")
+	var match func(int, int) (bool, error)
+	match = func(i, j int) (bool, error) {
+		if j == len(patternParts) {
+			return i == len(nameParts), nil
+		}
+		if patternParts[j] == "**" {
+			if ok, err := match(i, j+1); ok || err != nil {
+				return ok, err
+			}
+			if i < len(nameParts) {
+				return match(i+1, j)
+			}
+			return false, nil
+		}
+		if i >= len(nameParts) {
+			return false, nil
+		}
+		segmentOK, err := filepath.Match(patternParts[j], nameParts[i])
+		if err != nil || !segmentOK {
+			return false, err
+		}
+		return match(i+1, j+1)
+	}
+	return match(0, 0)
 }
 func buildCommand(ctx context.Context, dir, command string) (*exec.Cmd, error) {
 	if runtime.GOOS == "windows" {

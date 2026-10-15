@@ -17,6 +17,8 @@ type Service struct {
 	Credentials creds.Store
 	BackupRoot  string
 	BuildLog    projecthandler.LogFunc
+	PhaseLog    func(string)
+	TransferLog func(string, string)
 }
 
 type Options struct {
@@ -44,6 +46,9 @@ func (s *Service) DeployProject(ctx context.Context, projectName, connectionName
 	if err != nil {
 		return 0, err
 	}
+	if s.PhaseLog != nil {
+		s.PhaseLog("build")
+	}
 	artifacts, err := handler.Prepare(ctx, projecthandler.Project{Type: project.Type, LocalPath: project.LocalPath, BuildCommand: project.BuildCommand, OutputRelPath: project.OutputRelPath, ArtifactRulesJSON: project.ArtifactRulesJSON}, s.BuildLog)
 	if err != nil {
 		return 0, err
@@ -53,6 +58,9 @@ func (s *Service) DeployProject(ctx context.Context, projectName, connectionName
 		selected[i] = transfer.Artifact{LocalPath: a.LocalPath, RelativePath: a.RelativePath}
 	}
 	client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: connection.Host, Port: connection.Port, Protocol: connection.Protocol, Username: connection.Username, Password: password, TLSVerify: connection.TLSVerify}}
+	if s.PhaseLog != nil {
+		s.PhaseLog("planning")
+	}
 	backupRoot := s.BackupRoot
 	if backupRoot == "" {
 		paths, err := storage.InitAppPaths()
@@ -61,7 +69,7 @@ func (s *Service) DeployProject(ctx context.Context, projectName, connectionName
 		}
 		backupRoot = paths.BackupsDir
 	}
-	engine := transfer.Engine{DB: s.DB, Client: client, RemoteRoot: connection.RemoteRoot, BackupRoot: backupRoot, IISOfflinePage: opts.IISOfflinePage, IISShutdownDelay: opts.IISShutdownDelay}
+	engine := transfer.Engine{DB: s.DB, Client: client, RemoteRoot: connection.RemoteRoot, BackupRoot: backupRoot, IISOfflinePage: opts.IISOfflinePage, IISShutdownDelay: opts.IISShutdownDelay, OnPhase: s.PhaseLog, OnLog: s.TransferLog}
 	return engine.Deploy(ctx, project.ID, connection.ID, selected)
 }
 
