@@ -1,0 +1,12 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends vsftpd openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /srv/ftp/site/wwwroot
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 21 2121 2990 30000-30009
+ENTRYPOINT ["/entrypoint.sh"]

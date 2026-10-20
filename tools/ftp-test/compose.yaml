@@ -1,0 +1,51 @@
+services:
+  ftp:
+    build: .
+    environment:
+      FTP_USER: quickftp
+      FTP_PASSWORD: quickftp-test-only
+      FTP_PORT: 21
+      FTP_IMPLICIT: "NO"
+      PASV_MIN_PORT: 30000
+      PASV_MAX_PORT: 30009
+    ports:
+      - "2120:21"
+      - "30000-30009:30000-30009"
+    volumes:
+      - ftp-data:/srv/ftp
+    restart: unless-stopped
+
+  ftps-explicit:
+    build: .
+    environment:
+      FTP_USER: quickftp
+      FTP_PASSWORD: quickftp-test-only
+      FTP_PORT: 2121
+      FTP_IMPLICIT: "NO"
+      PASV_MIN_PORT: 31000
+      PASV_MAX_PORT: 31009
+    ports:
+      - "2121:2121"
+      - "31000-31009:31000-31009"
+    volumes:
+      - ftp-data:/srv/ftp
+    restart: unless-stopped
+
+  ftps-implicit:
+    build: .
+    environment:
+      FTP_USER: quickftp
+      FTP_PASSWORD: quickftp-test-only
+      FTP_PORT: 2990
+      FTP_IMPLICIT: "YES"
+      PASV_MIN_PORT: 32000
+      PASV_MAX_PORT: 32009
+    ports:
+      - "990:2990"
+      - "32000-32009:32000-32009"
+    volumes:
+      - ftp-data:/srv/ftp
+    restart: unless-stopped
+
+volumes:
+  ftp-data:

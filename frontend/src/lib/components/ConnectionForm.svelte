@@ -21,7 +21,28 @@
   let saving = false;
   let errorMsg = '';
 
+  function normalizeEndpoint() {
+    const value = host.trim();
+    if (!/^ftps?:\/\//i.test(value)) return;
+
+    try {
+      const url = new URL(value);
+      if (url.protocol !== 'ftp:' && url.protocol !== 'ftps:') throw new Error('Unsupported URL scheme');
+      if (!url.hostname || url.search || url.hash || url.username || url.password) throw new Error('Invalid FTP URL');
+      host = url.hostname;
+      if (url.port) port = Number(url.port);
+      else if (url.protocol === 'ftps:') port = 990;
+      if (url.pathname !== '/') remoteRoot = decodeURIComponent(url.pathname);
+      protocol = url.protocol === 'ftps:' ? 'ftps_explicit' : 'ftp';
+    } catch {
+      errorMsg = 'Enter a server name or an FTP/FTPS URL without credentials or query parameters';
+    }
+  }
+
   async function handleTest() {
+    errorMsg = '';
+    normalizeEndpoint();
+    if (errorMsg) return;
     if (!host || !username) {
       errorMsg = 'Host and username are required to test connection';
       return;
@@ -51,6 +72,9 @@
   }
 
   async function handleSave() {
+    errorMsg = '';
+    normalizeEndpoint();
+    if (errorMsg) return;
     if (!name.trim()) {
       errorMsg = 'Name is required';
       return;
@@ -120,7 +144,7 @@
       <div class="form-row">
         <div class="form-group">
           <label class="form-label" for="conn-host">Host / Server</label>
-          <input id="conn-host" class="form-input" type="text" bind:value={host} placeholder="ftp.example.com or IP" />
+          <input id="conn-host" class="form-input" type="text" bind:value={host} placeholder="ftp.example.com or ftps://ftp.example.com/site/wwwroot" />
         </div>
         <div class="form-group">
           <label class="form-label" for="conn-port">Port</label>
@@ -131,7 +155,7 @@
       <div class="form-group">
         <label class="form-label" for="conn-protocol">Protocol</label>
         <select id="conn-protocol" class="form-select" bind:value={protocol}>
-          <option value="ftps_explicit">Explicit FTPS (FTP over TLS - Recommended)</option>
+          <option value="ftps_explicit">FTPS (port 21 explicit, port 990 implicit)</option>
           <option value="ftp">Standard FTP (Insecure)</option>
         </select>
       </div>
@@ -152,7 +176,7 @@
       <div class="form-group">
         <label class="form-label" for="conn-root">Remote Root Directory</label>
         <input id="conn-root" class="form-input" type="text" bind:value={remoteRoot} placeholder="/site/wwwroot or /" />
-        <div class="form-hint">Target remote directory where build artifacts will be published</div>
+        <div class="form-hint">Target remote directory where build artifacts will be published. A path pasted in the server URL is moved here automatically.</div>
       </div>
 
       {#if protocol === 'ftps_explicit'}

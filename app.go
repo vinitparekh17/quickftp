@@ -256,11 +256,16 @@ func (a *App) TestConnection(dto ConnectionDTO) error {
 
 	protocol := storage.Protocol(dto.Protocol)
 	if protocol == storage.ProtocolFTPSExplicit {
-		opts = append(opts, ftp.DialWithExplicitTLS(&tls.Config{
+		tlsConfig := &tls.Config{
 			ServerName:         dto.Host,
 			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: !dto.TLSVerify,
-		}))
+		}
+		if port == 990 {
+			opts = append(opts, ftp.DialWithTLS(tlsConfig))
+		} else {
+			opts = append(opts, ftp.DialWithExplicitTLS(tlsConfig))
+		}
 	}
 
 	conn, err := ftp.Dial(addr, opts...)

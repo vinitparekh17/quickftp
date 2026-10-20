@@ -35,7 +35,12 @@ func (c *FTPClient) dial(ctx context.Context) (*ftp.ServerConn, error) {
 	}
 	opts := []ftp.DialOption{ftp.DialWithTimeout(timeout), ftp.DialWithContext(ctx)}
 	if c.Config.Protocol == storage.ProtocolFTPSExplicit {
-		opts = append(opts, ftp.DialWithExplicitTLS(&tls.Config{ServerName: c.Config.Host, MinVersion: tls.VersionTLS12, InsecureSkipVerify: !c.Config.TLSVerify, ClientSessionCache: tls.NewLRUClientSessionCache(8)}))
+		tlsConfig := &tls.Config{ServerName: c.Config.Host, MinVersion: tls.VersionTLS12, InsecureSkipVerify: !c.Config.TLSVerify, ClientSessionCache: tls.NewLRUClientSessionCache(8)}
+		if port == 990 {
+			opts = append(opts, ftp.DialWithTLS(tlsConfig))
+		} else {
+			opts = append(opts, ftp.DialWithExplicitTLS(tlsConfig))
+		}
 	} else if c.Config.Protocol != storage.ProtocolFTP {
 		return nil, fmt.Errorf("unsupported protocol %q", c.Config.Protocol)
 	}
