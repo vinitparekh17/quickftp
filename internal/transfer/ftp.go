@@ -21,6 +21,7 @@ type FTPConfig struct {
 	Username, Password string
 	TLSVerify          bool
 	Timeout            time.Duration
+	CredentialKey      string
 }
 type FTPClient struct{ Config FTPConfig }
 
@@ -71,6 +72,35 @@ func (c *FTPClient) List(ctx context.Context, root string) ([]RemoteFile, error)
 	err := c.with(ctx, func(conn *ftp.ServerConn) error { return c.walk(conn, root, 0, &files) })
 	return files, err
 }
+
+// ListDirectory lists a single directory and preserves only metadata supplied by the server.
+func (c *FTPClient) ListDirectory(ctx context.Context, dir string) ([]RemoteFile, error) {
+	var files []RemoteFile
+	err := c.with(ctx, func(conn *ftp.ServerConn) error {
+		entries, err := conn.List(dir)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.Name == "." || entry.Name == ".." {
+				continue
+			}
+			if strings.ContainsAny(entry.Name, "/\\") || strings.ContainsRune(entry.Name, 0) {
+				return fmt.Errorf("server returned unsafe directory entry")
+			}
+			remote := path.Join(dir, entry.Name)
+			isDir := entry.Type == ftp.EntryTypeFolder
+			var modified *time.Time
+			if !entry.Time.IsZero() {
+				t := entry.Time
+				modified = &t
+			}
+			files = append(files, RemoteFile{Path: remote, Size: int64(entry.Size), SizeKnown: !isDir && entry.Size > 0, IsDir: isDir, Modified: modified})
+		}
+		return nil
+	})
+	return files, err
+}
 func (c *FTPClient) walk(conn *ftp.ServerConn, dir string, depth int, out *[]RemoteFile) error {
 	if depth > 64 {
 		return fmt.Errorf("remote directory nesting exceeds 64 at %s", dir)
@@ -83,6 +113,9 @@ func (c *FTPClient) walk(conn *ftp.ServerConn, dir string, depth int, out *[]Rem
 		if e.Name == "." || e.Name == ".." {
 			continue
 		}
+		if strings.ContainsAny(e.Name, "/\\") || strings.ContainsRune(e.Name, 0) {
+			return fmt.Errorf("server returned unsafe directory entry")
+		}
 		remote := path.Join(dir, e.Name)
 		if e.Type == ftp.EntryTypeFolder {
 			if err := c.walk(conn, remote, depth+1, out); err != nil {
@@ -90,7 +123,12 @@ func (c *FTPClient) walk(conn *ftp.ServerConn, dir string, depth int, out *[]Rem
 			}
 			continue
 		}
-		*out = append(*out, RemoteFile{Path: remote, Size: int64(e.Size), IsDir: false})
+		var modified *time.Time
+		if !e.Time.IsZero() {
+			t := e.Time
+			modified = &t
+		}
+		*out = append(*out, RemoteFile{Path: remote, Size: int64(e.Size), SizeKnown: e.Size > 0, IsDir: false, Modified: modified})
 	}
 	return nil
 }
@@ -100,8 +138,20 @@ func (c *FTPClient) Download(ctx context.Context, name string, w io.Writer) erro
 		if err != nil {
 			return mapMissing(err)
 		}
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = r.Close()
+			case <-stop:
+			}
+		}()
 		_, copyErr := io.Copy(w, r)
 		closeErr := r.Close()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if copyErr != nil {
 			return copyErr
 		}
@@ -128,8 +178,20 @@ func (c *FTPClient) Upload(ctx context.Context, name string, r io.Reader) error 
 				}
 			}
 		}
-		return conn.Stor(name, r)
+		return conn.Stor(name, contextReader{ctx: ctx, r: r})
 	})
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
 }
 func (c *FTPClient) Rename(ctx context.Context, from, to string) error {
 	return c.with(ctx, func(conn *ftp.ServerConn) error { return conn.Rename(from, to) })

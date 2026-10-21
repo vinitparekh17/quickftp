@@ -21,9 +21,11 @@ import (
 var ErrNotFound = errors.New("remote file not found")
 
 type RemoteFile struct {
-	Path  string
-	Size  int64
-	IsDir bool
+	Path      string     `json:"path"`
+	Size      int64      `json:"size"`
+	SizeKnown bool       `json:"sizeKnown"`
+	IsDir     bool       `json:"isDir"`
+	Modified  *time.Time `json:"modified,omitempty"`
 }
 
 // Client methods return errors when the server's outcome cannot be confirmed.
@@ -46,6 +48,10 @@ type Engine struct {
 	// A non-empty page opts into the ASP.NET Core on IIS offline-file lifecycle.
 	IISOfflinePage   string
 	IISShutdownDelay time.Duration
+	Gate             *Gate
+	ConnectionID     int64
+	ConnectionName   string
+	OnFileTransfer   func(deploymentID int64, connectionID int64, connectionName, remote, local string, total, bytes int64, status, detail string)
 }
 
 func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, artifacts []Artifact) (deploymentID int64, retErr error) {
@@ -188,9 +194,19 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 		if err := e.DB.JournalFile(id, "app_offline.htm", "upload", "pending", int64(len(e.IISOfflinePage)), markerDigest, ""); err != nil {
 			return fail("iis_offline", err)
 		}
-		if err := e.Client.Upload(ctx, markerPath, bytes.NewBufferString(e.IISOfflinePage)); err != nil {
-			_ = e.DB.JournalFile(id, "app_offline.htm", "upload", "failed", int64(len(e.IISOfflinePage)), markerDigest, err.Error())
-			return fail("iis_offline", fmt.Errorf("activate IIS offline marker: %w", err))
+		release := func() {}
+		if e.Gate != nil {
+			var gateErr error
+			release, gateErr = e.Gate.Acquire(ctx)
+			if gateErr != nil {
+				return fail("iis_offline", gateErr)
+			}
+		}
+		uploadErr := e.Client.Upload(ctx, markerPath, bytes.NewBufferString(e.IISOfflinePage))
+		release()
+		if uploadErr != nil {
+			_ = e.DB.JournalFile(id, "app_offline.htm", "upload", "failed", int64(len(e.IISOfflinePage)), markerDigest, uploadErr.Error())
+			return fail("iis_offline", fmt.Errorf("activate IIS offline marker: %w", uploadErr))
 		}
 		if err := e.DB.JournalFile(id, "app_offline.htm", "upload", "completed", int64(len(e.IISOfflinePage)), markerDigest, ""); err != nil {
 			return fail("iis_offline", err)
@@ -221,15 +237,30 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 			return fail("upload", err)
 		}
 		e.log("stdout", fmt.Sprintf("Uploading %s (%d/%d, %d bytes)", f.relative, i+1, len(files), f.size))
+		e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Queued", "")
 		src, err := os.Open(f.LocalPath)
 		if err != nil {
+			e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Failed", err.Error())
 			return fail("upload", err)
 		}
-		err = e.Client.Upload(ctx, tmp, src)
+		release := func() {}
+		if e.Gate != nil {
+			var gateErr error
+			release, gateErr = e.Gate.Acquire(ctx)
+			if gateErr != nil {
+				_ = src.Close()
+				e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Failed", gateErr.Error())
+				return fail("upload", gateErr)
+			}
+		}
+		e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Running", "")
+		err = e.Client.Upload(ctx, tmp, &engineProgressReader{r: src, onBytes: func(n int64) { e.fileTransfer(id, target, f.LocalPath, f.size, n, "Running", "") }})
+		release()
 		_ = src.Close()
 		if err != nil { // A lost reply may follow a successful STOR; compare the staged bytes before deciding.
 			ok, checkErr := e.remoteMatches(ctx, tmp, f.digest)
 			if checkErr != nil || !ok {
+				e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Failed", err.Error())
 				_ = e.DB.JournalFile(id, f.relative, "upload", "failed", f.size, f.digest, err.Error())
 				return fail("upload", fmt.Errorf("upload %s outcome unresolved: %w", f.relative, err))
 			}
@@ -239,9 +270,11 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 			if err == nil {
 				err = errors.New("staged upload checksum mismatch")
 			}
+			e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Failed", err.Error())
 			return fail("upload", fmt.Errorf("verify %s: %w", f.relative, err))
 		}
 		if err := ctx.Err(); err != nil {
+			e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Failed", err.Error())
 			return fail("upload", err)
 		}
 		if backed[f.relative] {
@@ -259,16 +292,19 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 					}
 				}
 				if listErr != nil || stillThere {
+					e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Failed", err.Error())
 					return fail("upload", fmt.Errorf("replace %s outcome unresolved: %w", f.relative, err))
 				}
 			}
 			if err := ctx.Err(); err != nil {
+				e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Failed", err.Error())
 				return fail("upload", err)
 			}
 		}
 		if err = e.Client.Rename(ctx, tmp, target); err != nil { // Reconcile rename outcome before recording failure.
 			ok, checkErr := e.remoteMatches(ctx, target, f.digest)
 			if checkErr != nil || !ok {
+				e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Failed", err.Error())
 				return fail("upload", fmt.Errorf("promote %s outcome unresolved: %w", f.relative, err))
 			}
 		}
@@ -278,13 +314,16 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 			if err == nil {
 				err = errors.New("remote checksum mismatch")
 			}
+			e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Failed", err.Error())
 			return fail("verify", fmt.Errorf("verify %s: %w", f.relative, err))
 		}
 		if err = e.DB.JournalFile(id, f.relative, "upload", "verified", f.size, f.digest, ""); err != nil {
+			e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Failed", err.Error())
 			return fail("upload", err)
 		}
 		uploadBytes += f.size
 		e.log("success", fmt.Sprintf("Upload verified %s (%d/%d, %d/%d bytes)", f.relative, i+1, len(files), uploadBytes, totalArtifactBytes(files)))
+		e.fileTransfer(id, target, f.LocalPath, f.size, f.size, "Completed", "")
 	}
 	// Delete stale files only after all new artifacts are backed up and verified.
 	e.setPhase(id, "delete")
@@ -330,6 +369,28 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 		return id, err
 	}
 	return id, nil
+}
+
+func (e *Engine) fileTransfer(id int64, remote, local string, total, bytes int64, status, detail string) {
+	if e.OnFileTransfer != nil {
+		e.OnFileTransfer(id, e.ConnectionID, e.ConnectionName, remote, local, total, bytes, status, detail)
+	}
+}
+
+type engineProgressReader struct {
+	r       io.Reader
+	onBytes func(int64)
+	n, last int64
+}
+
+func (r *engineProgressReader) Read(p []byte) (int, error) {
+	n, e := r.r.Read(p)
+	r.n += int64(n)
+	if r.n-r.last >= 512*1024 {
+		r.last = r.n
+		r.onBytes(r.n)
+	}
+	return n, e
 }
 
 func (e *Engine) setPhase(id int64, phase string) {
@@ -396,7 +457,17 @@ func (e *Engine) Rollback(ctx context.Context, deploymentID int64) error {
 		if err != nil {
 			return err
 		}
+		release := func() {}
+		if e.Gate != nil {
+			var gateErr error
+			release, gateErr = e.Gate.Acquire(ctx)
+			if gateErr != nil {
+				_ = src.Close()
+				return gateErr
+			}
+		}
 		err = e.Client.Upload(ctx, tmp, src)
+		release()
 		_ = src.Close()
 		if err != nil {
 			ok, verifyErr := e.remoteMatches(ctx, tmp, digest)

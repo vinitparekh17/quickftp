@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -84,7 +85,11 @@ type DeployOptions struct {
 }
 
 type SettingsDTO struct {
-	BackupDir string `json:"backupDir"`
+	BackupDir        string `json:"backupDir"`
+	DownloadDir      string `json:"downloadDir"`
+	DownloadConflict string `json:"downloadConflict"`
+	UploadConflict   string `json:"uploadConflict"`
+	MaxConcurrent    int    `json:"maxConcurrent"`
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +105,9 @@ type App struct {
 	deployMu     sync.Mutex
 	deployCancel context.CancelFunc
 	settingsPath string
+	activity     *transfer.ActivityManager
+	gate         *transfer.Gate
+	settings     SettingsDTO
 }
 
 // startup is called by Wails after the frontend is ready.
@@ -119,29 +127,67 @@ func (a *App) startup(ctx context.Context) {
 	a.creds = creds.NewStore()
 	settingsPath := filepath.Join(paths.RootDir, "settings.json")
 	backupRoot := paths.BackupsDir
+	var settings SettingsDTO
 	if raw, readErr := os.ReadFile(settingsPath); readErr == nil {
-		var settings SettingsDTO
 		if json.Unmarshal(raw, &settings) == nil && settings.BackupDir != "" {
 			if abs, absErr := filepath.Abs(settings.BackupDir); absErr == nil {
 				backupRoot = abs
 			}
 		}
 	}
+	if settings.MaxConcurrent < 1 || settings.MaxConcurrent > 5 {
+		settings.MaxConcurrent = 2
+	}
+	if settings.DownloadDir == "" {
+		if d, e := os.UserHomeDir(); e == nil {
+			settings.DownloadDir = filepath.Join(d, "Downloads")
+		}
+	}
+	if abs, e := filepath.Abs(settings.DownloadDir); e == nil {
+		settings.DownloadDir = abs
+	}
+	if settings.DownloadConflict == "" {
+		settings.DownloadConflict = "Ask"
+	}
+	if settings.UploadConflict == "" {
+		settings.UploadConflict = "Ask"
+	}
 	a.settingsPath = settingsPath
+	a.settings = settings
+	a.gate = transfer.NewGate(settings.MaxConcurrent)
+	a.activity = transfer.OpenActivityManager(filepath.Join(paths.RootDir, "transfer-recovery.json"), a.gate)
+	a.activity.OnChange = func(v transfer.Activity) { wailsRuntime.EventsEmit(ctx, "transfer:changed", v) }
+	a.activity.OnLog = func(level, line string) {
+		wailsRuntime.EventsEmit(ctx, "transfer:log", map[string]string{"level": level, "message": line, "timestamp": time.Now().Format(time.RFC3339)})
+	}
 	a.service = &deploy.Service{
 		DB:          db,
 		Credentials: a.creds,
 		BackupRoot:  backupRoot,
+		Gate:        a.gate,
+		TransferFile: func(deploymentID, connectionID int64, connectionName, remote, local string, total, bytes int64, status, detail string) {
+			a.activity.RecordDeploymentTransfer(deploymentID, connectionID, connectionName, remote, local, total, bytes, status, detail)
+		},
 	}
 }
 
-func (a *App) GetSettings() SettingsDTO { return SettingsDTO{BackupDir: a.service.BackupRoot} }
+func (a *App) GetSettings() SettingsDTO {
+	s := a.settings
+	s.BackupDir = a.service.BackupRoot
+	return s
+}
 
 func (a *App) SelectDirectory(title string) (string, error) {
 	if title == "" {
 		title = "Select a directory"
 	}
 	return wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{Title: title})
+}
+func (a *App) SelectFiles(title string) ([]string, error) {
+	if title == "" {
+		title = "Select files to upload"
+	}
+	return wailsRuntime.OpenMultipleFilesDialog(a.ctx, wailsRuntime.OpenDialogOptions{Title: title})
 }
 
 func (a *App) SaveSettings(settings SettingsDTO) error {
@@ -154,13 +200,30 @@ func (a *App) SaveSettings(settings SettingsDTO) error {
 	}
 	a.deployMu.Lock()
 	defer a.deployMu.Unlock()
-	if a.deployCancel != nil {
-		return fmt.Errorf("settings cannot be changed during a deployment")
-	}
 	if err = os.MkdirAll(backupDir, 0700); err != nil {
 		return fmt.Errorf("create backup directory: %w", err)
 	}
-	data, err := json.MarshalIndent(SettingsDTO{BackupDir: backupDir}, "", "  ")
+	settings.BackupDir = backupDir
+	if settings.MaxConcurrent < 1 || settings.MaxConcurrent > 5 {
+		return fmt.Errorf("concurrency must be between 1 and 5")
+	}
+	if settings.DownloadDir == "" {
+		settings.DownloadDir = a.settings.DownloadDir
+	}
+	settings.DownloadDir, err = filepath.Abs(strings.TrimSpace(settings.DownloadDir))
+	if err != nil {
+		return err
+	}
+	if err = os.MkdirAll(settings.DownloadDir, 0700); err != nil {
+		return fmt.Errorf("create download directory: %w", err)
+	}
+	if settings.DownloadConflict == "" {
+		settings.DownloadConflict = "Ask"
+	}
+	if settings.UploadConflict == "" {
+		settings.UploadConflict = "Ask"
+	}
+	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -168,6 +231,8 @@ func (a *App) SaveSettings(settings SettingsDTO) error {
 		return err
 	}
 	a.service.BackupRoot = backupDir
+	a.settings = settings
+	a.gate.SetLimit(settings.MaxConcurrent)
 	return nil
 }
 
@@ -331,6 +396,11 @@ func (a *App) StartDeploy(projectName, connectionName string, opts DeployOptions
 	a.deployMu.Unlock()
 	// Wire the build-log callback to emit events to the frontend.
 	a.service.BuildLog = func(stream, line string) {
+		level := "INFO"
+		if strings.EqualFold(stream, "stderr") {
+			level = "ERROR"
+		}
+		a.activity.RecordLog(level, "BUILD "+line)
 		wailsRuntime.EventsEmit(a.ctx, "deploy:log", map[string]string{
 			"stream": stream,
 			"line":   line,
@@ -340,6 +410,11 @@ func (a *App) StartDeploy(projectName, connectionName string, opts DeployOptions
 		wailsRuntime.EventsEmit(a.ctx, "deploy:phase", map[string]interface{}{"phase": phase})
 	}
 	a.service.TransferLog = func(stream, line string) {
+		level := "INFO"
+		if strings.EqualFold(stream, "stderr") {
+			level = "ERROR"
+		}
+		a.activity.RecordLog(level, "DEPLOYMENT "+line)
 		wailsRuntime.EventsEmit(a.ctx, "deploy:log", map[string]string{"stream": stream, "line": line})
 	}
 
@@ -395,6 +470,276 @@ func (a *App) CancelDeploy() error {
 // RollbackDeployment rolls back a specific deployment.
 func (a *App) RollbackDeployment(deploymentID int64, connectionName string) error {
 	return a.service.Rollback(a.ctx, deploymentID, connectionName)
+}
+
+func (a *App) ListRemoteDirectory(connectionID int64, remotePath string) ([]transfer.RemoteFile, error) {
+	c, err := a.connectionByID(connectionID)
+	if err != nil {
+		return nil, err
+	}
+	if err = safeExplorerPath(c.RemoteRoot, remotePath); err != nil {
+		return nil, err
+	}
+	remotePath = path.Clean("/" + remotePath)
+	client, err := a.ftpClient(c)
+	if err != nil {
+		return nil, err
+	}
+	a.activity.RecordLog("INFO", "Listing "+remotePath)
+	ctx, cancel := context.WithTimeout(a.ctx, 45*time.Second)
+	defer cancel()
+	files, err := client.ListDirectory(ctx, remotePath)
+	if err != nil {
+		a.activity.RecordLog("ERROR", "Listing "+remotePath+": "+err.Error())
+		return nil, err
+	}
+	a.activity.RecordLog("INFO", fmt.Sprintf("Found %d entries in %s", len(files), remotePath))
+	return files, nil
+}
+func (a *App) QueueDownload(connectionID int64, remotePath, localPath string, size int64) (transfer.Activity, error) {
+	c, err := a.connectionByID(connectionID)
+	if err != nil {
+		return transfer.Activity{}, err
+	}
+	if err = safeExplorerPath(c.RemoteRoot, remotePath); err != nil {
+		return transfer.Activity{}, err
+	}
+	localPath, err = safeLocalDestination(a.settings.DownloadDir, localPath)
+	if err != nil {
+		return transfer.Activity{}, err
+	}
+	remotePath = path.Clean("/" + remotePath)
+	client, err := a.ftpClient(c)
+	if err != nil {
+		return transfer.Activity{}, err
+	}
+	return a.activity.AddDownload(c.ID, c.Name, remotePath, localPath, size, a.settings.DownloadConflict, client)
+}
+func (a *App) QueueDownloadDirectory(connectionID int64, remotePath string) ([]transfer.Activity, error) {
+	c, e := a.connectionByID(connectionID)
+	if e != nil {
+		return nil, e
+	}
+	if e = safeExplorerPath(c.RemoteRoot, remotePath); e != nil {
+		return nil, e
+	}
+	remotePath = path.Clean("/" + remotePath)
+	client, e := a.ftpClient(c)
+	if e != nil {
+		return nil, e
+	}
+	root := path.Clean("/" + c.RemoteRoot)
+	selectedRel := strings.TrimPrefix(strings.TrimPrefix(remotePath, root), "/")
+	selectedDir := filepath.Join(a.settings.DownloadDir, filepath.FromSlash(selectedRel))
+	selectedDir, e = safeLocalDestination(a.settings.DownloadDir, selectedDir)
+	if e != nil {
+		return nil, e
+	}
+	if e = os.MkdirAll(selectedDir, 0700); e != nil {
+		return nil, e
+	}
+	queued := []transfer.Activity{}
+	var walk func(string, int) error
+	walk = func(dir string, depth int) error {
+		if depth > 64 {
+			return fmt.Errorf("remote directory nesting exceeds 64")
+		}
+		items, err := client.ListDirectory(a.ctx, dir)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			if item.IsDir {
+				rel := strings.TrimPrefix(strings.TrimPrefix(item.Path, root), "/")
+				local := filepath.Join(a.settings.DownloadDir, filepath.FromSlash(rel))
+				local, err = safeLocalDestination(a.settings.DownloadDir, local)
+				if err != nil {
+					return err
+				}
+				if err = os.MkdirAll(local, 0700); err != nil {
+					return err
+				}
+				if err = walk(item.Path, depth+1); err != nil {
+					return err
+				}
+				continue
+			}
+			rel := strings.TrimPrefix(strings.TrimPrefix(item.Path, root), "/")
+			if rel == "" || strings.HasPrefix(rel, "../") {
+				return fmt.Errorf("unsafe path returned by server")
+			}
+			local := filepath.Join(a.settings.DownloadDir, filepath.FromSlash(rel))
+			local, err = safeLocalDestination(a.settings.DownloadDir, local)
+			if err != nil {
+				return err
+			}
+			job, err := a.activity.AddDownload(c.ID, c.Name, item.Path, local, item.Size, a.settings.DownloadConflict, client)
+			if err != nil {
+				return err
+			}
+			queued = append(queued, job)
+		}
+		return nil
+	}
+	if e = walk(remotePath, 0); e != nil {
+		return queued, e
+	}
+	return queued, nil
+}
+func (a *App) QueueUpload(connectionID int64, localPath, remotePath string) (transfer.Activity, error) {
+	c, e := a.connectionByID(connectionID)
+	if e != nil {
+		return transfer.Activity{}, e
+	}
+	if e = safeExplorerPath(c.RemoteRoot, remotePath); e != nil {
+		return transfer.Activity{}, e
+	}
+	remotePath = path.Clean("/" + remotePath)
+	client, e := a.ftpClient(c)
+	if e != nil {
+		return transfer.Activity{}, e
+	}
+	return a.activity.AddUpload(c.ID, c.Name, remotePath, localPath, a.settings.UploadConflict, client)
+}
+func (a *App) QueueUploadDirectory(connectionID int64, localDir, remotePath string) ([]transfer.Activity, error) {
+	c, e := a.connectionByID(connectionID)
+	if e != nil {
+		return nil, e
+	}
+	if e = safeExplorerPath(c.RemoteRoot, remotePath); e != nil {
+		return nil, e
+	}
+	remotePath = path.Clean("/" + remotePath)
+	client, e := a.ftpClient(c)
+	if e != nil {
+		return nil, e
+	}
+	base := filepath.Clean(localDir)
+	queued := []transfer.Activity{}
+	e = filepath.WalkDir(base, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symbolic links are not uploaded")
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(base, p)
+		if err != nil {
+			return err
+		}
+		remote := path.Join(remotePath, filepath.ToSlash(rel))
+		if err = safeExplorerPath(c.RemoteRoot, remote); err != nil {
+			return err
+		}
+		job, err := a.activity.AddUpload(c.ID, c.Name, remote, p, a.settings.UploadConflict, client)
+		if err != nil {
+			return err
+		}
+		queued = append(queued, job)
+		return nil
+	})
+	return queued, e
+}
+func (a *App) GetTransfers() []transfer.Activity { return a.activity.List() }
+func (a *App) CancelTransfer(id string) error    { return a.activity.Cancel(id) }
+func (a *App) ResolveTransferConflict(id, policy string) error {
+	return a.activity.ResolveConflict(id, policy)
+}
+func (a *App) RemoveTransfer(id string) { a.activity.Remove(id) }
+func (a *App) RetryTransfer(id string) error {
+	for _, x := range a.activity.List() {
+		if x.ID == id {
+			pw, e := a.creds.GetPassword(x.Profile.CredentialKey)
+			if e != nil {
+				return fmt.Errorf("read connection credential for retry: %w", e)
+			}
+			client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: x.Profile.Host, Port: x.Profile.Port, Protocol: storage.Protocol(x.Profile.Protocol), Username: x.Profile.Username, Password: pw, TLSVerify: x.Profile.TLSVerify, CredentialKey: x.Profile.CredentialKey}}
+			return a.activity.Retry(id, client)
+		}
+	}
+	return fmt.Errorf("transfer not found")
+}
+func (a *App) connectionByID(id int64) (*storage.Connection, error) {
+	cs, e := a.db.ListConnections()
+	if e != nil {
+		return nil, e
+	}
+	for i := range cs {
+		if cs[i].ID == id {
+			return &cs[i], nil
+		}
+	}
+	return nil, fmt.Errorf("connection not found")
+}
+func (a *App) ftpClient(c *storage.Connection) (*transfer.FTPClient, error) {
+	pw, e := a.creds.GetPassword(c.CredTargetKey)
+	if e != nil {
+		return nil, fmt.Errorf("read connection credential: %w", e)
+	}
+	return &transfer.FTPClient{Config: transfer.FTPConfig{Host: c.Host, Port: c.Port, Protocol: c.Protocol, Username: c.Username, Password: pw, TLSVerify: c.TLSVerify, CredentialKey: c.CredTargetKey}}, nil
+}
+func safeExplorerPath(root, p string) error {
+	if strings.Contains(p, "\\") || strings.ContainsRune(p, 0) {
+		return fmt.Errorf("unsafe remote path")
+	}
+	clean := path.Clean("/" + p)
+	base := path.Clean("/" + root)
+	if clean != base && !strings.HasPrefix(clean, strings.TrimRight(base, "/")+"/") {
+		return fmt.Errorf("remote path outside configured root")
+	}
+	for _, s := range strings.Split(p, "/") {
+		if s == ".." {
+			return fmt.Errorf("remote path traversal rejected")
+		}
+	}
+	return nil
+}
+func safeLocalDestination(root, dest string) (string, error) {
+	base, e := filepath.Abs(root)
+	if e != nil {
+		return "", e
+	}
+	target, e := filepath.Abs(dest)
+	if e != nil {
+		return "", e
+	}
+	rel, e := filepath.Rel(base, target)
+	if e != nil {
+		return "", e
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("destination is outside the configured download directory")
+	}
+	if e = os.MkdirAll(base, 0700); e != nil {
+		return "", fmt.Errorf("create download directory: %w", e)
+	}
+	rootReal, e := filepath.EvalSymlinks(base)
+	if e != nil {
+		return "", e
+	}
+	probe := target
+	for {
+		if _, e = os.Lstat(probe); e == nil {
+			resolved, re := filepath.EvalSymlinks(probe)
+			if re != nil {
+				return "", re
+			}
+			inside, re := filepath.Rel(rootReal, resolved)
+			if re != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(os.PathSeparator)) {
+				return "", fmt.Errorf("destination resolves outside the configured download directory")
+			}
+			break
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return "", fmt.Errorf("could not resolve destination parent")
+		}
+		probe = parent
+	}
+	return target, nil
 }
 
 // GetDeploymentHistory returns the most recent deployments.

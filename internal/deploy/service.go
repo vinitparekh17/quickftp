@@ -13,12 +13,14 @@ import (
 )
 
 type Service struct {
-	DB          *storage.DB
-	Credentials creds.Store
-	BackupRoot  string
-	BuildLog    projecthandler.LogFunc
-	PhaseLog    func(string)
-	TransferLog func(string, string)
+	DB           *storage.DB
+	Credentials  creds.Store
+	BackupRoot   string
+	BuildLog     projecthandler.LogFunc
+	PhaseLog     func(string)
+	TransferLog  func(string, string)
+	Gate         *transfer.Gate
+	TransferFile func(deploymentID, connectionID int64, connectionName, remote, local string, total, bytes int64, status, detail string)
 }
 
 type Options struct {
@@ -69,7 +71,7 @@ func (s *Service) DeployProject(ctx context.Context, projectName, connectionName
 		}
 		backupRoot = paths.BackupsDir
 	}
-	engine := transfer.Engine{DB: s.DB, Client: client, RemoteRoot: connection.RemoteRoot, BackupRoot: backupRoot, IISOfflinePage: opts.IISOfflinePage, IISShutdownDelay: opts.IISShutdownDelay, OnPhase: s.PhaseLog, OnLog: s.TransferLog}
+	engine := transfer.Engine{DB: s.DB, Client: client, RemoteRoot: connection.RemoteRoot, BackupRoot: backupRoot, IISOfflinePage: opts.IISOfflinePage, IISShutdownDelay: opts.IISShutdownDelay, OnPhase: s.PhaseLog, OnLog: s.TransferLog, Gate: s.Gate, ConnectionID: connection.ID, ConnectionName: connection.Name, OnFileTransfer: s.TransferFile}
 	return engine.Deploy(ctx, project.ID, connection.ID, selected)
 }
 
@@ -93,5 +95,5 @@ func (s *Service) Rollback(ctx context.Context, deploymentID int64, connectionNa
 		return fmt.Errorf("read connection credential: %w", err)
 	}
 	client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: connection.Host, Port: connection.Port, Protocol: connection.Protocol, Username: connection.Username, Password: password, TLSVerify: connection.TLSVerify}}
-	return (&transfer.Engine{DB: s.DB, Client: client, RemoteRoot: connection.RemoteRoot}).Rollback(ctx, deploymentID)
+	return (&transfer.Engine{DB: s.DB, Client: client, RemoteRoot: connection.RemoteRoot, Gate: s.Gate, ConnectionID: connection.ID, ConnectionName: connection.Name, OnFileTransfer: s.TransferFile}).Rollback(ctx, deploymentID)
 }

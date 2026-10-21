@@ -102,4 +102,3 @@ func (db *DB) ListDeployments(limit int) ([]Deployment, error) {
 	}
 	return out, rows.Err()
 }
-

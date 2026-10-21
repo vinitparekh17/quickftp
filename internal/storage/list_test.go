@@ -101,4 +101,3 @@ func TestStorageListAndCRUD(t *testing.T) {
 		t.Fatalf("unexpected deployments: %+v", deps)
 	}
 }
-
