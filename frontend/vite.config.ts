@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [svelte()],
   resolve: {
     alias: {
-      '$lib': '/src/lib',
+      $lib: '/src/lib',
     },
   },
   server: {

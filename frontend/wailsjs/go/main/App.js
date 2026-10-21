@@ -6,6 +6,10 @@ export function CancelDeploy() {
   return window['go']['main']['App']['CancelDeploy']();
 }
 
+export function CancelTransfer(arg1) {
+  return window['go']['main']['App']['CancelTransfer'](arg1);
+}
+
 export function DeleteConnection(arg1) {
   return window['go']['main']['App']['DeleteConnection'](arg1);
 }
@@ -38,6 +42,42 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
+export function GetTransfers() {
+  return window['go']['main']['App']['GetTransfers']();
+}
+
+export function ListRemoteDirectory(arg1, arg2) {
+  return window['go']['main']['App']['ListRemoteDirectory'](arg1, arg2);
+}
+
+export function QueueDownload(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['QueueDownload'](arg1, arg2, arg3, arg4);
+}
+
+export function QueueDownloadDirectory(arg1, arg2) {
+  return window['go']['main']['App']['QueueDownloadDirectory'](arg1, arg2);
+}
+
+export function QueueUpload(arg1, arg2, arg3) {
+  return window['go']['main']['App']['QueueUpload'](arg1, arg2, arg3);
+}
+
+export function QueueUploadDirectory(arg1, arg2, arg3) {
+  return window['go']['main']['App']['QueueUploadDirectory'](arg1, arg2, arg3);
+}
+
+export function RemoveTransfer(arg1) {
+  return window['go']['main']['App']['RemoveTransfer'](arg1);
+}
+
+export function ResolveTransferConflict(arg1, arg2) {
+  return window['go']['main']['App']['ResolveTransferConflict'](arg1, arg2);
+}
+
+export function RetryTransfer(arg1) {
+  return window['go']['main']['App']['RetryTransfer'](arg1);
+}
+
 export function RollbackDeployment(arg1, arg2) {
   return window['go']['main']['App']['RollbackDeployment'](arg1, arg2);
 }
@@ -56,6 +96,10 @@ export function SaveSettings(arg1) {
 
 export function SelectDirectory(arg1) {
   return window['go']['main']['App']['SelectDirectory'](arg1);
+}
+
+export function SelectFiles(arg1) {
+  return window['go']['main']['App']['SelectFiles'](arg1);
 }
 
 export function StartDeploy(arg1, arg2, arg3) {

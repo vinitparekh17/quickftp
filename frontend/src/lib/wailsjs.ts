@@ -9,8 +9,22 @@
 //          GetPendingDeployments, GetDeploymentFiles } from '../../wailsjs/go/main/App';
 // import { EventsOn } from '../../wailsjs/runtime/runtime';
 
-import type { ConnectionDTO, ProjectDTO, DeploymentDTO, DeploymentFileDTO, DeployOptions } from './types';
-import { deployLogs, deployPhase, deployStatus, activeDeploymentId } from './stores';
+import type {
+  ConnectionDTO,
+  ProjectDTO,
+  DeploymentDTO,
+  DeploymentFileDTO,
+  DeployOptions,
+  RemoteFileDTO,
+  TransferDTO,
+} from './types';
+import {
+  deployLogs,
+  deployPhase,
+  deployStatus,
+  activeDeploymentId,
+  transfers,
+} from './stores';
 
 declare global {
   interface Window {
@@ -160,17 +174,57 @@ const mockDeployments: DeploymentDTO[] = [
 ];
 
 const mockDeploymentFiles: DeploymentFileDTO[] = [
-  { id: 1, deploymentId: 1, relativePath: 'index.html', stage: 'upload', status: 'verified', sizeBytes: 4520, sha256Local: '', errorDetail: '', updatedAt: '' },
-  { id: 2, deploymentId: 1, relativePath: 'main.js', stage: 'upload', status: 'verified', sizeBytes: 245800, sha256Local: '', errorDetail: '', updatedAt: '' },
-  { id: 3, deploymentId: 1, relativePath: 'styles.css', stage: 'upload', status: 'verified', sizeBytes: 18300, sha256Local: '', errorDetail: '', updatedAt: '' },
-  { id: 4, deploymentId: 1, relativePath: 'assets/logo.png', stage: 'upload', status: 'verified', sizeBytes: 12400, sha256Local: '', errorDetail: '', updatedAt: '' },
+  {
+    id: 1,
+    deploymentId: 1,
+    relativePath: 'index.html',
+    stage: 'upload',
+    status: 'verified',
+    sizeBytes: 4520,
+    sha256Local: '',
+    errorDetail: '',
+    updatedAt: '',
+  },
+  {
+    id: 2,
+    deploymentId: 1,
+    relativePath: 'main.js',
+    stage: 'upload',
+    status: 'verified',
+    sizeBytes: 245800,
+    sha256Local: '',
+    errorDetail: '',
+    updatedAt: '',
+  },
+  {
+    id: 3,
+    deploymentId: 1,
+    relativePath: 'styles.css',
+    stage: 'upload',
+    status: 'verified',
+    sizeBytes: 18300,
+    sha256Local: '',
+    errorDetail: '',
+    updatedAt: '',
+  },
+  {
+    id: 4,
+    deploymentId: 1,
+    relativePath: 'assets/logo.png',
+    stage: 'upload',
+    status: 'verified',
+    sizeBytes: 12400,
+    sha256Local: '',
+    errorDetail: '',
+    updatedAt: '',
+  },
 ];
 
 const mockPendingDeployments: DeploymentDTO[] = [];
 
 // Simulated delay for mock calls
 function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ============================================================
@@ -185,12 +239,30 @@ export async function getConnections(): Promise<ConnectionDTO[]> {
   return [...mockConnections];
 }
 
-export async function getSettings(): Promise<{ backupDir: string }> {
+export async function getSettings(): Promise<{
+  backupDir: string;
+  downloadDir: string;
+  downloadConflict: string;
+  uploadConflict: string;
+  maxConcurrent: number;
+}> {
   if (isWails) return await window.go.main.App.GetSettings();
   await delay(80);
-  return { ...mockSettings };
+  return {
+    ...mockSettings,
+    downloadDir: '',
+    downloadConflict: 'Ask',
+    uploadConflict: 'Ask',
+    maxConcurrent: 2,
+  };
 }
-export async function saveSettings(settings: { backupDir: string }): Promise<void> {
+export async function saveSettings(settings: {
+  backupDir: string;
+  downloadDir?: string;
+  downloadConflict?: string;
+  uploadConflict?: string;
+  maxConcurrent?: number;
+}): Promise<void> {
   if (isWails) return await window.go.main.App.SaveSettings(settings);
   await delay(100);
   mockSettings = { ...settings };
@@ -198,6 +270,88 @@ export async function saveSettings(settings: { backupDir: string }): Promise<voi
 export async function selectDirectory(title: string): Promise<string> {
   if (!isWails) return '';
   return await window.go.main.App.SelectDirectory(title);
+}
+
+export async function listRemoteDirectory(
+  connectionId: number,
+  remotePath: string
+): Promise<RemoteFileDTO[]> {
+  if (!isWails)
+    throw new Error('Remote browsing requires the QuickFTP desktop app');
+  return await window.go.main.App.ListRemoteDirectory(connectionId, remotePath);
+}
+export async function queueDownload(
+  connectionId: number,
+  remotePath: string,
+  localPath: string,
+  size: number
+): Promise<TransferDTO> {
+  if (!isWails) throw new Error('Transfers require the QuickFTP desktop app');
+  return await window.go.main.App.QueueDownload(
+    connectionId,
+    remotePath,
+    localPath,
+    size
+  );
+}
+export async function queueUpload(
+  connectionId: number,
+  localPath: string,
+  remotePath: string
+): Promise<TransferDTO> {
+  if (!isWails) throw new Error('Transfers require the QuickFTP desktop app');
+  return await window.go.main.App.QueueUpload(
+    connectionId,
+    localPath,
+    remotePath
+  );
+}
+export async function queueDownloadDirectory(
+  connectionId: number,
+  remotePath: string
+): Promise<TransferDTO[]> {
+  if (!isWails) throw new Error('Transfers require the QuickFTP desktop app');
+  return await window.go.main.App.QueueDownloadDirectory(
+    connectionId,
+    remotePath
+  );
+}
+export async function queueUploadDirectory(
+  connectionId: number,
+  localPath: string,
+  remotePath: string
+): Promise<TransferDTO[]> {
+  if (!isWails) throw new Error('Transfers require the QuickFTP desktop app');
+  return await window.go.main.App.QueueUploadDirectory(
+    connectionId,
+    localPath,
+    remotePath
+  );
+}
+export async function selectFiles(title: string): Promise<string[]> {
+  if (!isWails) return [];
+  return await window.go.main.App.SelectFiles(title);
+}
+export async function getTransfers(): Promise<TransferDTO[]> {
+  if (!isWails) return [];
+  return (await window.go.main.App.GetTransfers()) || [];
+}
+export async function cancelTransfer(id: string): Promise<void> {
+  if (isWails) return await window.go.main.App.CancelTransfer(id);
+}
+export async function resolveTransferConflict(
+  id: string,
+  policy: string
+): Promise<void> {
+  if (isWails)
+    return await window.go.main.App.ResolveTransferConflict(id, policy);
+}
+export async function retryTransfer(id: string): Promise<void> {
+  if (isWails) return await window.go.main.App.RetryTransfer(id);
+}
+export async function removeTransfer(id: string): Promise<void> {
+  if (isWails) await window.go.main.App.RemoveTransfer(id);
+  transfers.update((xs) => xs.filter((x) => x.id !== id));
 }
 
 export async function saveConnection(dto: ConnectionDTO): Promise<void> {
@@ -210,7 +364,7 @@ export async function saveConnection(dto: ConnectionDTO): Promise<void> {
     dto.createdAt = new Date().toISOString();
     mockConnections.push({ ...dto });
   } else {
-    const idx = mockConnections.findIndex(c => c.id === dto.id);
+    const idx = mockConnections.findIndex((c) => c.id === dto.id);
     if (idx >= 0) mockConnections[idx] = { ...dto };
   }
 }
@@ -220,7 +374,7 @@ export async function deleteConnection(id: number): Promise<void> {
     return await window.go.main.App.DeleteConnection(id);
   }
   await delay(200);
-  const idx = mockConnections.findIndex(c => c.id === id);
+  const idx = mockConnections.findIndex((c) => c.id === id);
   if (idx >= 0) mockConnections.splice(idx, 1);
 }
 
@@ -255,7 +409,7 @@ export async function saveProject(dto: ProjectDTO): Promise<void> {
     dto.id = ++mockProjectId;
     mockProjects.push({ ...dto });
   } else {
-    const idx = mockProjects.findIndex(p => p.id === dto.id);
+    const idx = mockProjects.findIndex((p) => p.id === dto.id);
     if (idx >= 0) mockProjects[idx] = { ...dto };
   }
 }
@@ -265,7 +419,7 @@ export async function deleteProject(id: number): Promise<void> {
     return await window.go.main.App.DeleteProject(id);
   }
   await delay(200);
-  const idx = mockProjects.findIndex(p => p.id === id);
+  const idx = mockProjects.findIndex((p) => p.id === id);
   if (idx >= 0) mockProjects.splice(idx, 1);
 }
 
@@ -279,7 +433,11 @@ export async function startDeploy(
   opts: DeployOptions
 ): Promise<void> {
   if (isWails) {
-    return await window.go.main.App.StartDeploy(projectName, connectionName, opts);
+    return await window.go.main.App.StartDeploy(
+      projectName,
+      connectionName,
+      opts
+    );
   }
 
   // Mock deployment simulation
@@ -293,13 +451,19 @@ export async function startDeploy(
   const phases = ['build', 'backup', 'upload', 'verify', 'done'];
   const logLines = [
     { stream: 'stdout', line: `[deploy] Starting deployment #${deployId}` },
-    { stream: 'stdout', line: `[deploy] Project: ${projectName} → ${connectionName}` },
+    {
+      stream: 'stdout',
+      line: `[deploy] Project: ${projectName} → ${connectionName}`,
+    },
     { stream: 'stdout', line: '[build] Running build command...' },
     { stream: 'stdout', line: '[build] Compiling TypeScript...' },
     { stream: 'stdout', line: '[build] Bundling with Webpack...' },
     { stream: 'stdout', line: '[build] Build completed successfully (23.4s)' },
     { stream: 'stdout', line: '[backup] Creating remote backup...' },
-    { stream: 'stdout', line: '[backup] Backed up 142 files to /backups/20241015' },
+    {
+      stream: 'stdout',
+      line: '[backup] Backed up 142 files to /backups/20241015',
+    },
     { stream: 'stdout', line: '[upload] Uploading 38 files...' },
     { stream: 'stdout', line: '[upload]   index.html (4.5 KB)' },
     { stream: 'stdout', line: '[upload]   main.abc123.js (245.8 KB)' },
@@ -308,33 +472,66 @@ export async function startDeploy(
     { stream: 'stdout', line: '[upload] Upload complete (38/38 files)' },
     { stream: 'stdout', line: '[verify] Verifying deployed files...' },
     { stream: 'stdout', line: '[verify] All checksums match' },
-    { stream: 'stdout', line: `[deploy] Deployment #${deployId} completed successfully ✓` },
+    {
+      stream: 'stdout',
+      line: `[deploy] Deployment #${deployId} completed successfully ✓`,
+    },
   ];
 
   let phaseIdx = 0;
   for (let i = 0; i < logLines.length; i++) {
     await delay(400 + Math.random() * 300);
     if (mockCancelRequested) {
-      deployLogs.update(logs => [...logs, { stream: 'stderr', line: '[deploy] Cancelled after the current operation' }]);
+      deployLogs.update((logs) => [
+        ...logs,
+        {
+          stream: 'stderr',
+          line: '[deploy] Cancelled after the current operation',
+        },
+      ]);
       deployStatus.set('cancelled');
-      mockDeployments.unshift({ id: deployId, projectId: mockProjects.find(p => p.name === projectName)?.id ?? 0, connectionId: mockConnections.find(c => c.name === connectionName)?.id ?? 0, status: 'cancelled', currentPhase: 'upload', backupDir: '/backups/mock-cancelled', errorMessage: 'Deployment cancelled by user', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
+      mockDeployments.unshift({
+        id: deployId,
+        projectId: mockProjects.find((p) => p.name === projectName)?.id ?? 0,
+        connectionId:
+          mockConnections.find((c) => c.name === connectionName)?.id ?? 0,
+        status: 'cancelled',
+        currentPhase: 'upload',
+        backupDir: '/backups/mock-cancelled',
+        errorMessage: 'Deployment cancelled by user',
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+      });
       return;
     }
-    deployLogs.update(logs => [...logs, logLines[i]]);
+    deployLogs.update((logs) => [...logs, logLines[i]]);
 
     // Advance phase
-    if (i === 5 && phaseIdx < phases.length) { phaseIdx = 1; deployPhase.set(phases[phaseIdx]); }
-    if (i === 7 && phaseIdx < phases.length) { phaseIdx = 2; deployPhase.set(phases[phaseIdx]); }
-    if (i === 13 && phaseIdx < phases.length) { phaseIdx = 3; deployPhase.set(phases[phaseIdx]); }
-    if (i === 15 && phaseIdx < phases.length) { phaseIdx = 4; deployPhase.set(phases[phaseIdx]); }
+    if (i === 5 && phaseIdx < phases.length) {
+      phaseIdx = 1;
+      deployPhase.set(phases[phaseIdx]);
+    }
+    if (i === 7 && phaseIdx < phases.length) {
+      phaseIdx = 2;
+      deployPhase.set(phases[phaseIdx]);
+    }
+    if (i === 13 && phaseIdx < phases.length) {
+      phaseIdx = 3;
+      deployPhase.set(phases[phaseIdx]);
+    }
+    if (i === 15 && phaseIdx < phases.length) {
+      phaseIdx = 4;
+      deployPhase.set(phases[phaseIdx]);
+    }
   }
 
   deployStatus.set('completed');
 
   mockDeployments.unshift({
     id: deployId,
-    projectId: mockProjects.find(p => p.name === projectName)?.id ?? 0,
-    connectionId: mockConnections.find(c => c.name === connectionName)?.id ?? 0,
+    projectId: mockProjects.find((p) => p.name === projectName)?.id ?? 0,
+    connectionId:
+      mockConnections.find((c) => c.name === connectionName)?.id ?? 0,
     status: 'completed',
     currentPhase: 'done',
     backupDir: '/backups/20241015_mock',
@@ -349,16 +546,24 @@ export async function cancelDeploy(): Promise<void> {
   mockCancelRequested = true;
 }
 
-export async function rollbackDeployment(deploymentId: number, connectionName: string): Promise<void> {
+export async function rollbackDeployment(
+  deploymentId: number,
+  connectionName: string
+): Promise<void> {
   if (isWails) {
-    return await window.go.main.App.RollbackDeployment(deploymentId, connectionName);
+    return await window.go.main.App.RollbackDeployment(
+      deploymentId,
+      connectionName
+    );
   }
   await delay(2000);
-  const dep = mockDeployments.find(d => d.id === deploymentId);
+  const dep = mockDeployments.find((d) => d.id === deploymentId);
   if (dep) dep.status = 'rolled_back';
 }
 
-export async function getDeploymentHistory(limit: number): Promise<DeploymentDTO[]> {
+export async function getDeploymentHistory(
+  limit: number
+): Promise<DeploymentDTO[]> {
   if (isWails) {
     return await window.go.main.App.GetDeploymentHistory(limit);
   }
@@ -374,12 +579,15 @@ export async function getPendingDeployments(): Promise<DeploymentDTO[]> {
   return [...mockPendingDeployments];
 }
 
-export async function getDeploymentFiles(deploymentId: number, stage: string): Promise<DeploymentFileDTO[]> {
+export async function getDeploymentFiles(
+  deploymentId: number,
+  stage: string
+): Promise<DeploymentFileDTO[]> {
   if (isWails) {
     return await window.go.main.App.GetDeploymentFiles(deploymentId, stage);
   }
   await delay(200);
-  return mockDeploymentFiles.filter(f => f.deploymentId === deploymentId);
+  return mockDeploymentFiles.filter((f) => f.deploymentId === deploymentId);
 }
 
 // ============================================================
@@ -389,7 +597,10 @@ export async function getDeploymentFiles(deploymentId: number, stage: string): P
 type EventCallback = (data: any) => void;
 const eventListeners: Map<string, EventCallback[]> = new Map();
 
-export function onEvent(eventName: string, callback: EventCallback): () => void {
+export function onEvent(
+  eventName: string,
+  callback: EventCallback
+): () => void {
   if (isWails && window.runtime?.EventsOn) {
     // Use real Wails event system
     window.runtime.EventsOn(eventName, callback);
@@ -415,11 +626,11 @@ export function onEvent(eventName: string, callback: EventCallback): () => void 
 
 // Helper to look up names by ID (used in UI display)
 export function getConnectionNameById(id: number): string {
-  const conn = mockConnections.find(c => c.id === id);
+  const conn = mockConnections.find((c) => c.id === id);
   return conn?.name ?? `Connection #${id}`;
 }
 
 export function getProjectNameById(id: number): string {
-  const proj = mockProjects.find(p => p.id === id);
+  const proj = mockProjects.find((p) => p.id === id);
   return proj?.name ?? `Project #${id}`;
 }

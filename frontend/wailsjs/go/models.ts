@@ -128,6 +128,10 @@ export namespace main {
 	}
 	export class SettingsDTO {
 	    backupDir: string;
+	    downloadDir: string;
+	    downloadConflict: string;
+	    uploadConflict: string;
+	    maxConcurrent: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new SettingsDTO(source);
@@ -136,7 +140,138 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.backupDir = source["backupDir"];
+	        this.downloadDir = source["downloadDir"];
+	        this.downloadConflict = source["downloadConflict"];
+	        this.uploadConflict = source["uploadConflict"];
+	        this.maxConcurrent = source["maxConcurrent"];
 	    }
+	}
+
+}
+
+export namespace transfer {
+	
+	export class ConnectionSnapshot {
+	    host: string;
+	    port: number;
+	    protocol: string;
+	    username: string;
+	    tlsVerify: boolean;
+	    credentialKey: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ConnectionSnapshot(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.host = source["host"];
+	        this.port = source["port"];
+	        this.protocol = source["protocol"];
+	        this.username = source["username"];
+	        this.tlsVerify = source["tlsVerify"];
+	        this.credentialKey = source["credentialKey"];
+	    }
+	}
+	export class Activity {
+	    id: string;
+	    direction: string;
+	    connectionId: number;
+	    connectionName: string;
+	    remotePath: string;
+	    localPath: string;
+	    status: string;
+	    bytes: number;
+	    total: number;
+	    // Go type: time
+	    startedAt: any;
+	    // Go type: time
+	    finishedAt?: any;
+	    error?: string;
+	    verification?: string;
+	    conflictPolicy?: string;
+	    profile: ConnectionSnapshot;
+	
+	    static createFrom(source: any = {}) {
+	        return new Activity(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.direction = source["direction"];
+	        this.connectionId = source["connectionId"];
+	        this.connectionName = source["connectionName"];
+	        this.remotePath = source["remotePath"];
+	        this.localPath = source["localPath"];
+	        this.status = source["status"];
+	        this.bytes = source["bytes"];
+	        this.total = source["total"];
+	        this.startedAt = this.convertValues(source["startedAt"], null);
+	        this.finishedAt = this.convertValues(source["finishedAt"], null);
+	        this.error = source["error"];
+	        this.verification = source["verification"];
+	        this.conflictPolicy = source["conflictPolicy"];
+	        this.profile = this.convertValues(source["profile"], ConnectionSnapshot);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class RemoteFile {
+	    path: string;
+	    size: number;
+	    sizeKnown: boolean;
+	    isDir: boolean;
+	    // Go type: time
+	    modified?: any;
+	
+	    static createFrom(source: any = {}) {
+	        return new RemoteFile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.size = source["size"];
+	        this.sizeKnown = source["sizeKnown"];
+	        this.isDir = source["isDir"];
+	        this.modified = this.convertValues(source["modified"], null);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

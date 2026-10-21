@@ -53,7 +53,37 @@ export interface DeployOptions {
   iisShutdownDelay: number; // milliseconds
 }
 
-export type Page = 'dashboard' | 'connections' | 'projects' | 'deploy' | 'history' | 'settings';
+export type Page =
+  | 'dashboard'
+  | 'connections'
+  | 'projects'
+  | 'deploy'
+  | 'history'
+  | 'settings'
+  | 'files';
+
+export interface RemoteFileDTO {
+  path: string;
+  size: number;
+  sizeKnown: boolean;
+  isDir: boolean;
+  modified?: string;
+}
+export interface TransferDTO {
+  id: string;
+  direction: string;
+  connectionId: number;
+  connectionName: string;
+  remotePath: string;
+  localPath: string;
+  status: string;
+  bytes: number;
+  total: number;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+  verification?: string;
+}
 
 export interface ToastMessage {
   id: number;
