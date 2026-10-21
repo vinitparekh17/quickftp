@@ -1,6 +1,17 @@
-<script lang="ts">
+﻿<script lang="ts">
+  import Icon from './lib/components/Icon.svelte';
   import { onMount } from 'svelte';
-  import { currentPage, toasts, deployLogs, deployPhase, deployStatus, activeDeploymentId, addToast } from './lib/stores';
+  import {
+    currentPage,
+    toasts,
+    deployLogs,
+    deployPhase,
+    deployStatus,
+    activeDeploymentId,
+    transfers,
+    activityLogs,
+    addToast,
+  } from './lib/stores';
   import { onEvent } from './lib/wailsjs';
   import Sidebar from './lib/components/Sidebar.svelte';
   import ConnectionList from './lib/components/ConnectionList.svelte';
@@ -10,40 +21,140 @@
   import RecoveryBanner from './lib/components/RecoveryBanner.svelte';
   import Dashboard from './lib/components/Dashboard.svelte';
   import SettingsView from './lib/components/SettingsView.svelte';
+  import FilesView from './lib/components/FilesView.svelte';
+  import TransferPanel from './lib/components/TransferPanel.svelte';
 
   onMount(() => {
     // Listen for backend Wails events
-    const unsubLog = onEvent('deploy:log', (data: { stream: string; line: string }) => {
-      const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      deployLogs.update(logs => [...logs, { ...data, line: `${stamp}  ${data.line}` }]);
-    });
+    const unsubLog = onEvent(
+      'deploy:log',
+      (data: { stream: string; line: string }) => {
+        const stamp = new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        });
+        deployLogs.update((logs) => [
+          ...logs,
+          { ...data, line: `${stamp}  ${data.line}` },
+        ]);
+      }
+    );
 
-    const unsubStarted = onEvent('deploy:started', (data: { project: string; connection: string }) => {
-      deployStatus.set('running');
-      deployPhase.set('planning');
-    });
+    const unsubStarted = onEvent(
+      'deploy:started',
+      (data: { project: string; connection: string }) => {
+        deployStatus.set('running');
+        deployPhase.set('planning');
+      }
+    );
 
-    const unsubPhase = onEvent('deploy:phase', (data: { deploymentId: number; phase: string }) => {
-      deployPhase.set(data.phase);
-    });
+    const unsubPhase = onEvent(
+      'deploy:phase',
+      (data: { deploymentId: number; phase: string }) => {
+        deployPhase.set(data.phase);
+      }
+    );
 
-    const unsubComplete = onEvent('deploy:complete', (data: { deploymentId: number }) => {
-      deployStatus.set('completed');
-      deployPhase.set('done');
-      activeDeploymentId.set(data.deploymentId);
-      addToast('success', `Deployment #${data.deploymentId} completed successfully!`);
-    });
+    const unsubComplete = onEvent(
+      'deploy:complete',
+      (data: { deploymentId: number }) => {
+        deployStatus.set('completed');
+        deployPhase.set('done');
+        activeDeploymentId.set(data.deploymentId);
+        addToast(
+          'success',
+          `Deployment #${data.deploymentId} completed successfully!`
+        );
+      }
+    );
 
-    const unsubError = onEvent('deploy:error', (data: { deploymentId: number; error: string }) => {
-      deployStatus.set('failed');
-      activeDeploymentId.set(data.deploymentId);
-      addToast('error', `Deployment #${data.deploymentId} failed: ${data.error}`);
-    });
+    const unsubError = onEvent(
+      'deploy:error',
+      (data: { deploymentId: number; error: string }) => {
+        deployStatus.set('failed');
+        activeDeploymentId.set(data.deploymentId);
+        addToast(
+          'error',
+          `Deployment #${data.deploymentId} failed: ${data.error}`
+        );
+      }
+    );
 
-    const unsubCancelled = onEvent('deploy:cancelled', (data: { deploymentId: number; error: string }) => {
-      deployStatus.set('cancelled');
-      activeDeploymentId.set(data.deploymentId || null);
-      addToast('info', data.deploymentId ? `Deployment #${data.deploymentId} cancelled. Use History to review or roll back.` : 'Deployment cancelled before the remote transfer began.');
+    const unsubCancelled = onEvent(
+      'deploy:cancelled',
+      (data: { deploymentId: number; error: string }) => {
+        deployStatus.set('cancelled');
+        activeDeploymentId.set(data.deploymentId || null);
+        addToast(
+          'info',
+          data.deploymentId
+            ? `Deployment #${data.deploymentId} cancelled. Use History to review or roll back.`
+            : 'Deployment cancelled before the remote transfer began.'
+        );
+      }
+    );
+    const unsubTransfer = onEvent('transfer:changed', (data: any) => {
+      if (!data?.id) return;
+      transfers.update((xs) => {
+        const current = Array.isArray(xs) ? xs : [];
+        const i = current.findIndex((x) => x.id === data.id);
+        if (i < 0) return [data, ...current];
+        const next = [...current];
+        next[i] = data;
+        return next;
+      });
+    });
+    const unsubDeployPhase = onEvent('deploy:phase', (data: any) => {
+      if (data?.phase)
+        activityLogs.update((xs) => [
+          ...xs.slice(-999),
+          {
+            timestamp: new Date().toISOString(),
+            level: 'INFO',
+            category: 'Deployment',
+            message: `Deployment phase: ${data.phase}`,
+          },
+        ]);
+    });
+    const unsubDeployResult = onEvent('deploy:complete', (data: any) =>
+      activityLogs.update((xs) => [
+        ...xs.slice(-999),
+        {
+          timestamp: new Date().toISOString(),
+          level: 'SUCCESS',
+          category: 'Deployment',
+          message: `Deployment #${data.deploymentId} completed`,
+        },
+      ])
+    );
+    const unsubDeployError = onEvent('deploy:error', (data: any) =>
+      activityLogs.update((xs) => [
+        ...xs.slice(-999),
+        {
+          timestamp: new Date().toISOString(),
+          level: 'ERROR',
+          category: 'Deployment',
+          message: `Deployment #${data.deploymentId} failed: ${data.error}`,
+        },
+      ])
+    );
+    const unsubTransferActivity = onEvent('transfer:log', (data: any) => {
+      if (data?.message) {
+        const line = String(data.message);
+        const upper = line.toUpperCase();
+        const category = upper.startsWith('BUILD ')
+          ? 'Build'
+          : upper.includes('BACKUP') || upper.includes('RESTORE')
+            ? 'Backup'
+            : upper.startsWith('DEPLOYMENT ')
+              ? 'Deployment'
+              : 'Transfer';
+        activityLogs.update((xs) => [
+          ...xs.slice(-999),
+          { ...data, category, message: line.replace(/^(BUILD|DEPLOYMENT) /, '') },
+        ]);
+      }
     });
 
     return () => {
@@ -53,9 +164,13 @@
       unsubComplete();
       unsubError();
       unsubCancelled();
+      unsubTransfer();
+      unsubDeployPhase();
+      unsubDeployResult();
+      unsubDeployError();
+      unsubTransferActivity();
     };
   });
-
 </script>
 
 <div class="app-layout">
@@ -77,8 +192,11 @@
         <HistoryView />
       {:else if $currentPage === 'settings'}
         <SettingsView />
+      {:else if $currentPage === 'files'}
+        <FilesView />
       {/if}
     </main>
+    <TransferPanel />
   </div>
 </div>
 
@@ -86,21 +204,11 @@
 {#each $toasts as t (t.id)}
   <div class="toast toast-{t.type}">
     {#if t.type === 'success'}
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <polyline points="20 6 9 17 4 12" />
-      </svg>
+      <Icon name="success" size={18} />
     {:else if t.type === 'error'}
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="12" r="10" />
-        <line x1="15" y1="9" x2="9" y2="15" />
-        <line x1="9" y1="9" x2="15" y2="15" />
-      </svg>
+      <Icon name="error" size={18} />
     {:else}
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="12" r="10" />
-        <line x1="12" y1="16" x2="12" y2="12" />
-        <line x1="12" y1="8" x2="12.01" y2="8" />
-      </svg>
+      <Icon name="info" size={18} />
     {/if}
     <span>{t.message}</span>
   </div>

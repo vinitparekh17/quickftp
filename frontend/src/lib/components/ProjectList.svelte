@@ -1,7 +1,16 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
+  import { getProjectIcon } from '../icons';
   import { onMount } from 'svelte';
   import type { ProjectDTO } from '../types';
-  import { projects, deploymentHistory, currentPage, selectedProjectName, newProjectRequested, addToast } from '../stores';
+  import {
+    projects,
+    deploymentHistory,
+    currentPage,
+    selectedProjectName,
+    newProjectRequested,
+    addToast,
+  } from '../stores';
   import { getProjects, getDeploymentHistory, deleteProject } from '../wailsjs';
   import ProjectForm from './ProjectForm.svelte';
 
@@ -11,7 +20,10 @@
 
   onMount(async () => {
     await loadProjects();
-    if ($newProjectRequested) { $newProjectRequested = false; handleAdd(); }
+    if ($newProjectRequested) {
+      $newProjectRequested = false;
+      handleAdd();
+    }
   });
 
   async function loadProjects() {
@@ -66,32 +78,36 @@
   }
 </script>
 
-<div class="card">
+<div class="card page-card">
   <div class="card-header">
     <div>
       <h2>Projects</h2>
-      <p class="text-sm text-muted">Configure Angular and .NET application build & artifact paths</p>
+      <p class="text-sm text-muted">
+        Configure Angular and .NET application build & artifact paths
+      </p>
     </div>
     <button class="btn btn-primary" on:click={handleAdd}>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="12" y1="5" x2="12" y2="19" />
-        <line x1="5" y1="12" x2="19" y2="12" />
-      </svg>
+      <Icon name="plus" size={16} />
       <span>Add Project</span>
     </button>
   </div>
 
   <div class="card-body" style="padding: 0;">
     {#if loading}
-      <div style="padding: 32px; text-align: center;" class="text-muted">Loading projects...</div>
+      <div style="padding: 32px; text-align: center;" class="text-muted">
+        Loading projects...
+      </div>
     {:else if $projects.length === 0}
       <div class="empty-state">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 8 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
-        </svg>
+        <Icon name="projects" size={24} />
         <h3>No projects yet</h3>
-        <p>Define an Angular or .NET project with its build command and output directory.</p>
-        <button class="btn btn-primary" on:click={handleAdd}>Add First Project</button>
+        <p>
+          Define an Angular or .NET project with its build command and output
+          directory.
+        </p>
+        <button class="btn btn-primary" on:click={handleAdd}
+          >Add First Project</button
+        >
       </div>
     {:else}
       <div class="table-wrap">
@@ -115,42 +131,69 @@
                 </td>
                 <td>
                   {#if p.projectType === 'angular'}
-                    <span class="badge badge-info">Angular</span>
+                    <span class="badge badge-info"><Icon name={getProjectIcon('angular')} size={12} /> Angular</span>
                   {:else}
-                    <span class="badge badge-success">.NET</span>
+                    <span class="badge badge-success"><Icon name={getProjectIcon('dotnet')} size={12} /> .NET</span>
                   {/if}
                 </td>
-                <td class="text-mono text-muted truncate" style="max-width: 200px;" title={p.localPath}>
+                <td
+                  class="text-mono text-muted truncate"
+                  style="max-width: 200px;"
+                  title={p.localPath}
+                >
                   {p.localPath}
                 </td>
-                <td class="text-mono text-muted truncate" style="max-width: 160px;" title={p.buildCommand}>
+                <td
+                  class="text-mono text-muted truncate"
+                  style="max-width: 160px;"
+                  title={p.buildCommand}
+                >
                   {p.buildCommand || '(none)'}
                 </td>
                 <td class="text-mono text-muted">{p.outputRelPath}</td>
-                <td>{#if $deploymentHistory.find(d => d.projectId === p.id)}{@const last = $deploymentHistory.find(d => d.projectId === p.id)}<span class="activity-status" class:success={last?.status === 'completed'} class:failed={last?.status === 'failed' && !last?.cancelled}><i></i>{last?.cancelled ? 'Cancelled' : last?.status === 'completed' ? 'Success' : last?.status === 'failed' ? 'Failed' : last?.status}</span>{:else}<span class="text-muted">No runs</span>{/if}</td>
+                <td
+                  >{#if $deploymentHistory.find((d) => d.projectId === p.id)}{@const last =
+                      $deploymentHistory.find((d) => d.projectId === p.id)}<span
+                      class="activity-status"
+                      class:success={last?.status === 'completed'}
+                      class:failed={last?.status === 'failed' &&
+                        !last?.cancelled}
+                      ><i></i>{last?.cancelled
+                        ? 'Cancelled'
+                        : last?.status === 'completed'
+                          ? 'Success'
+                          : last?.status === 'failed'
+                            ? 'Failed'
+                            : last?.status}</span
+                    >{:else}<span class="text-muted">No runs</span>{/if}</td
+                >
                 <td style="text-align: right; white-space: nowrap;">
-                  <button
-                    class="btn btn-primary btn-sm"
-                    on:click={() => handleDeploy(p)}
-                    title="Deploy this project"
-                  >
-                    Deploy
-                  </button>
-                  <button
-                    class="btn btn-ghost btn-sm"
-                    on:click={() => handleEdit(p)}
-                    title="Edit project"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    class="btn btn-ghost btn-sm"
-                    style="color: var(--color-danger);"
-                    on:click={() => handleDelete(p)}
-                    title="Delete project"
-                  >
-                    Delete
-                  </button>
+                  <div class="table-actions">
+                    <button
+                      class="table-icon-action action-primary"
+                      on:click={() => handleDeploy(p)}
+                      title={`Deploy ${p.name}`}
+                      aria-label={`Deploy ${p.name}`}
+                    >
+                      <Icon name="deploy" size={17} />
+                    </button>
+                    <button
+                      class="table-icon-action action-secondary"
+                      on:click={() => handleEdit(p)}
+                      title={`Edit ${p.name}`}
+                      aria-label={`Edit ${p.name}`}
+                    >
+                      <Icon name="edit" size={16} />
+                    </button>
+                    <button
+                      class="table-icon-action action-danger"
+                      on:click={() => handleDelete(p)}
+                      title={`Delete ${p.name}`}
+                      aria-label={`Delete ${p.name}`}
+                    >
+                      <Icon name="trash" size={16} />
+                    </button>
+                  </div>
                 </td>
               </tr>
             {/each}
@@ -168,4 +211,3 @@
     on:cancel={handleCancel}
   />
 {/if}
-

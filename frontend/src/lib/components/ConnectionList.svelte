@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { onMount } from 'svelte';
   import type { ConnectionDTO } from '../types';
   import { connections, addToast } from '../stores';
@@ -37,7 +38,11 @@
   }
 
   async function handleDelete(c: ConnectionDTO) {
-    if (!confirm(`Are you sure you want to delete connection "${c.name}"? This will also remove stored credentials.`)) {
+    if (
+      !confirm(
+        `Are you sure you want to delete connection "${c.name}"? This will also remove stored credentials.`
+      )
+    ) {
       return;
     }
     try {
@@ -76,35 +81,33 @@
   }
 </script>
 
-<div class="card">
+<div class="card page-card">
   <div class="card-header">
     <div>
       <h2>FTP Connections</h2>
-      <p class="text-sm text-muted">Manage remote FTP and explicit FTPS server credentials</p>
+      <p class="text-sm text-muted">
+        Manage remote FTP and explicit FTPS server credentials
+      </p>
     </div>
     <button class="btn btn-primary" on:click={handleAdd}>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="12" y1="5" x2="12" y2="19" />
-        <line x1="5" y1="12" x2="19" y2="12" />
-      </svg>
+      <Icon name="plus" size={16} />
       <span>Add Connection</span>
     </button>
   </div>
 
   <div class="card-body" style="padding: 0;">
     {#if loading}
-      <div style="padding: 32px; text-align: center;" class="text-muted">Loading connections...</div>
+      <div style="padding: 32px; text-align: center;" class="text-muted">
+        Loading connections...
+      </div>
     {:else if $connections.length === 0}
       <div class="empty-state">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <rect width="20" height="8" x="2" y="2" rx="2" ry="2" />
-          <rect width="20" height="8" x="2" y="14" rx="2" ry="2" />
-          <line x1="6" x2="6.01" y1="6" y2="6" />
-          <line x1="6" x2="6.01" y1="18" y2="18" />
-        </svg>
+        <Icon name="server" size={24} />
         <h3>No connections yet</h3>
         <p>Create an FTP or FTPS connection to deploy your build artifacts.</p>
-        <button class="btn btn-primary" on:click={handleAdd}>Add First Connection</button>
+        <button class="btn btn-primary" on:click={handleAdd}
+          >Add First Connection</button
+        >
       </div>
     {:else}
       <div class="table-wrap">
@@ -136,31 +139,45 @@
                 <td class="text-mono">{c.host}:{c.port}</td>
                 <td>{c.username}</td>
                 <td class="text-mono text-muted">{c.remoteRoot}</td>
-                <td>{#if connectionState[c.id] === 'checking'}<span class="activity-status running"><i></i>Testing</span>{:else if connectionState[c.id] === 'connected'}<span class="activity-status success"><i></i>Connected</span>{:else if connectionState[c.id] === 'failed'}<span class="activity-status failed"><i></i>Failed</span>{:else}<span class="activity-status"><i></i>Not tested</span>{/if}</td>
+                <td
+                  >{#if connectionState[c.id] === 'checking'}<span
+                      class="activity-status running"><i></i>Testing</span
+                    >{:else if connectionState[c.id] === 'connected'}<span
+                      class="activity-status success"><i></i>Connected</span
+                    >{:else if connectionState[c.id] === 'failed'}<span
+                      class="activity-status failed"><i></i>Failed</span
+                    >{:else}<span class="activity-status"
+                      ><i></i>Not tested</span
+                    >{/if}</td
+                >
                 <td style="text-align: right; white-space: nowrap;">
-                  <button
-                    class="btn btn-secondary btn-sm"
-                    on:click={() => handleTest(c)}
-                    disabled={testingId === c.id}
-                    title="Test connection"
-                  >
-                    {testingId === c.id ? 'Testing...' : 'Test'}
-                  </button>
-                  <button
-                    class="btn btn-ghost btn-sm"
-                    on:click={() => handleEdit(c)}
-                    title="Edit connection"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    class="btn btn-ghost btn-sm"
-                    style="color: var(--color-danger);"
-                    on:click={() => handleDelete(c)}
-                    title="Delete connection"
-                  >
-                    Delete
-                  </button>
+                  <div class="table-actions">
+                    <button
+                      class="table-icon-action action-primary"
+                      on:click={() => handleTest(c)}
+                      disabled={testingId === c.id}
+                      title={testingId === c.id ? `Testing connection "${c.name}"...` : `Test connection "${c.name}"`}
+                      aria-label={`Test connection "${c.name}"`}
+                    >
+                      <Icon name="refresh" size={16} spin={testingId === c.id} />
+                    </button>
+                    <button
+                      class="table-icon-action action-secondary"
+                      on:click={() => handleEdit(c)}
+                      title={`Edit connection "${c.name}"`}
+                      aria-label={`Edit connection "${c.name}"`}
+                    >
+                      <Icon name="edit" size={16} />
+                    </button>
+                    <button
+                      class="table-icon-action action-danger"
+                      on:click={() => handleDelete(c)}
+                      title={`Delete connection "${c.name}"`}
+                      aria-label={`Delete connection "${c.name}"`}
+                    >
+                      <Icon name="trash" size={16} />
+                    </button>
+                  </div>
                 </td>
               </tr>
             {/each}
@@ -178,4 +195,3 @@
     on:cancel={handleCancel}
   />
 {/if}
-
