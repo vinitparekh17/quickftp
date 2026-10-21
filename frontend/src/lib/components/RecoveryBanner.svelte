@@ -1,7 +1,12 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { onMount } from 'svelte';
   import { pendingDeployments, currentPage, addToast } from '../stores';
-  import { getPendingDeployments, rollbackDeployment, getConnectionNameById } from '../wailsjs';
+  import {
+    getPendingDeployments,
+    rollbackDeployment,
+    getConnectionNameById,
+  } from '../wailsjs';
 
   let rollingBack = false;
 
@@ -17,7 +22,11 @@
     if ($pendingDeployments.length === 0) return;
     const dep = $pendingDeployments[0];
     const connName = getConnectionNameById(dep.connectionId);
-    if (!confirm(`Interrupted deployment #${dep.id} detected from previous run. Do you want to roll back changes using the verified remote backup?`)) {
+    if (
+      !confirm(
+        `Interrupted deployment #${dep.id} detected from previous run. Do you want to roll back changes using the verified remote backup?`
+      )
+    ) {
       return;
     }
 
@@ -41,24 +50,28 @@
 {#if $pendingDeployments.length > 0}
   <div class="recovery-banner">
     <div class="recovery-banner-text">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
-        <line x1="12" y1="9" x2="12" y2="13" />
-        <line x1="12" y1="17" x2="12.01" y2="17" />
-      </svg>
+      <Icon name="warning" size={18} />
       <div>
         <strong>Startup Recovery:</strong>
-        {$pendingDeployments.length} unfinished deployment(s) detected from previous run.
+        {$pendingDeployments.length} unfinished deployment(s) detected from previous
+        run.
       </div>
     </div>
     <div style="display: flex; gap: 8px;">
       <button class="btn btn-secondary btn-sm" on:click={viewHistory}>
+        <Icon name="history" size={14} />
         View in History
       </button>
-      <button class="btn btn-danger btn-sm" on:click={handleRollbackFirst} disabled={rollingBack}>
-        {rollingBack ? 'Rolling back...' : `Rollback #${$pendingDeployments[0].id}`}
+      <button
+        class="btn btn-danger btn-sm"
+        on:click={handleRollbackFirst}
+        disabled={rollingBack}
+      >
+        <Icon name="rollback" size={14} />
+        {rollingBack
+          ? 'Rolling back...'
+          : `Rollback #${$pendingDeployments[0].id}`}
       </button>
     </div>
   </div>
 {/if}
-

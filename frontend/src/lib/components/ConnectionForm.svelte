@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { createEventDispatcher } from 'svelte';
   import type { ConnectionDTO } from '../types';
   import { testConnection, saveConnection } from '../wailsjs';
@@ -27,15 +28,24 @@
 
     try {
       const url = new URL(value);
-      if (url.protocol !== 'ftp:' && url.protocol !== 'ftps:') throw new Error('Unsupported URL scheme');
-      if (!url.hostname || url.search || url.hash || url.username || url.password) throw new Error('Invalid FTP URL');
+      if (url.protocol !== 'ftp:' && url.protocol !== 'ftps:')
+        throw new Error('Unsupported URL scheme');
+      if (
+        !url.hostname ||
+        url.search ||
+        url.hash ||
+        url.username ||
+        url.password
+      )
+        throw new Error('Invalid FTP URL');
       host = url.hostname;
       if (url.port) port = Number(url.port);
       else if (url.protocol === 'ftps:') port = 990;
       if (url.pathname !== '/') remoteRoot = decodeURIComponent(url.pathname);
       protocol = url.protocol === 'ftps:' ? 'ftps_explicit' : 'ftp';
     } catch {
-      errorMsg = 'Enter a server name or an FTP/FTPS URL without credentials or query parameters';
+      errorMsg =
+        'Enter a server name or an FTP/FTPS URL without credentials or query parameters';
     }
   }
 
@@ -126,36 +136,59 @@
   <div class="modal">
     <div class="modal-header">
       <h3>{connection ? 'Edit Connection' : 'New Connection'}</h3>
-      <button class="modal-close" on:click={handleCancel}>✕</button>
+      <button class="modal-close" on:click={handleCancel} aria-label="Close dialog" title="Close"><Icon name="close" size={16} /></button>
     </div>
 
     <div class="modal-body">
       {#if errorMsg}
-        <div style="background: var(--color-danger-light); color: var(--color-danger); padding: 8px 12px; border-radius: var(--radius-sm); margin-bottom: 16px; font-size: 13px;">
+        <div
+          style="background: var(--color-danger-light); color: var(--color-danger); padding: 8px 12px; border-radius: var(--radius-sm); margin-bottom: 16px; font-size: 13px;"
+        >
           {errorMsg}
         </div>
       {/if}
 
       <div class="form-group">
         <label class="form-label" for="conn-name">Connection Name</label>
-        <input id="conn-name" class="form-input" type="text" bind:value={name} placeholder="e.g. Production IIS" />
+        <input
+          id="conn-name"
+          class="form-input"
+          type="text"
+          bind:value={name}
+          placeholder="e.g. Production IIS"
+        />
       </div>
 
       <div class="form-row">
         <div class="form-group">
           <label class="form-label" for="conn-host">Host / Server</label>
-          <input id="conn-host" class="form-input" type="text" bind:value={host} placeholder="ftp.example.com or ftps://ftp.example.com/site/wwwroot" />
+          <input
+            id="conn-host"
+            class="form-input"
+            type="text"
+            bind:value={host}
+            placeholder="ftp.example.com or ftps://ftp.example.com/site/wwwroot"
+          />
         </div>
         <div class="form-group">
           <label class="form-label" for="conn-port">Port</label>
-          <input id="conn-port" class="form-input" type="number" bind:value={port} min="1" max="65535" />
+          <input
+            id="conn-port"
+            class="form-input"
+            type="number"
+            bind:value={port}
+            min="1"
+            max="65535"
+          />
         </div>
       </div>
 
       <div class="form-group">
         <label class="form-label" for="conn-protocol">Protocol</label>
         <select id="conn-protocol" class="form-select" bind:value={protocol}>
-          <option value="ftps_explicit">FTPS (port 21 explicit, port 990 implicit)</option>
+          <option value="ftps_explicit"
+            >FTPS (port 21 explicit, port 990 implicit)</option
+          >
           <option value="ftp">Standard FTP (Insecure)</option>
         </select>
       </div>
@@ -163,43 +196,81 @@
       <div class="form-row">
         <div class="form-group">
           <label class="form-label" for="conn-user">Username</label>
-          <input id="conn-user" class="form-input" type="text" bind:value={username} autocomplete="off" />
+          <input
+            id="conn-user"
+            class="form-input"
+            type="text"
+            bind:value={username}
+            autocomplete="off"
+          />
         </div>
         <div class="form-group">
           <label class="form-label" for="conn-pass">
             Password {connection ? '(Leave blank to keep existing)' : ''}
           </label>
-          <input id="conn-pass" class="form-input" type="password" bind:value={password} autocomplete="new-password" />
+          <input
+            id="conn-pass"
+            class="form-input"
+            type="password"
+            bind:value={password}
+            autocomplete="new-password"
+          />
         </div>
       </div>
 
       <div class="form-group">
         <label class="form-label" for="conn-root">Remote Root Directory</label>
-        <input id="conn-root" class="form-input" type="text" bind:value={remoteRoot} placeholder="/site/wwwroot or /" />
-        <div class="form-hint">Target remote directory where build artifacts will be published. A path pasted in the server URL is moved here automatically.</div>
+        <input
+          id="conn-root"
+          class="form-input"
+          type="text"
+          bind:value={remoteRoot}
+          placeholder="/site/wwwroot or /"
+        />
+        <div class="form-hint">
+          Target remote directory where build artifacts will be published. A
+          path pasted in the server URL is moved here automatically.
+        </div>
       </div>
 
       {#if protocol === 'ftps_explicit'}
         <div class="form-group">
           <label class="form-check">
             <input type="checkbox" bind:checked={tlsVerify} />
-            <span>Verify TLS Certificate (Recommended: uncheck only for self-signed certificates)</span>
+            <span
+              >Verify TLS Certificate (Recommended: uncheck only for self-signed
+              certificates)</span
+            >
           </label>
         </div>
       {/if}
 
       <div class="form-actions">
-        <button type="button" class="btn btn-secondary" on:click={handleTest} disabled={testing || saving}>
+        <button
+          type="button"
+          class="btn btn-secondary"
+          on:click={handleTest}
+          disabled={testing || saving}
+        >
           {testing ? 'Testing...' : 'Test Connection'}
         </button>
-        <button type="button" class="btn btn-ghost" on:click={handleCancel} disabled={saving}>
+        <button
+          type="button"
+          class="btn btn-ghost"
+          on:click={handleCancel}
+          disabled={saving}
+        >
           Cancel
         </button>
-        <button type="button" class="btn btn-primary" on:click={handleSave} disabled={saving || testing}>
+        <button
+          type="button"
+          class="btn btn-primary"
+          on:click={handleSave}
+          disabled={saving || testing}
+        >
           {saving ? 'Saving...' : 'Save Connection'}
         </button>
       </div>
     </div>
   </div>
 </div>
-
