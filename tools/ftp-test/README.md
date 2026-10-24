@@ -8,6 +8,19 @@ Start the servers from this directory:
 docker compose up --build -d
 ```
 
+Run the explicit FTPS directory upload integration test from the repository root:
+
+```powershell
+.\tools\ftp-test\test-explicit-ftps.ps1
+```
+
+It starts the explicit FTPS service on port `2121` only if it is stopped; it
+leaves an already running container untouched. It uploads a temporary
+80-file `.git/objects` tree through the same activity manager used by the UI,
+verifies the files, then downloads, renames, and deletes test files. Pass a
+different file count to stress larger trees, for example
+`.\tools\ftp-test\test-explicit-ftps.ps1 -Files 500`.
+
 Use these values in QuickFTP:
 
 | Mode | Host | Port | Protocol | Username | Password | Remote root |
