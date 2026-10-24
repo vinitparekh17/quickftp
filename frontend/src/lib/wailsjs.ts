@@ -315,6 +315,30 @@ export async function listRemoteDirectory(
     throw new Error('Remote browsing requires the QuickFTP desktop app');
   return await window.go.main.App.ListRemoteDirectory(connectionId, remotePath);
 }
+
+export interface RemoteDeleteItem {
+  path: string;
+  isDir: boolean;
+}
+
+export async function deleteRemoteEntries(
+  connectionId: number,
+  items: RemoteDeleteItem[]
+): Promise<void> {
+  if (!isWails)
+    throw new Error('Remote file deletion requires the QuickFTP desktop app');
+  return await window.go.main.App.DeleteRemoteEntries(connectionId, items);
+}
+
+export async function deleteRemoteEntry(
+  connectionId: number,
+  remotePath: string,
+  isDir: boolean
+): Promise<void> {
+  if (!isWails)
+    throw new Error('Remote file deletion requires the QuickFTP desktop app');
+  return await window.go.main.App.DeleteRemoteEntry(connectionId, remotePath, isDir);
+}
 export async function queueDownload(
   connectionId: number,
   remotePath: string,

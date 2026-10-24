@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { connections, remotePathByConnection, addToast } from '../stores';
   import {
     getConnections,
@@ -11,6 +11,8 @@
     selectDirectory,
     selectFiles,
     getSettings,
+    deleteRemoteEntries,
+    deleteRemoteEntry,
   } from '../wailsjs';
   import type { ConnectionDTO, RemoteFileDTO } from '../types';
   import { pointerSelection, keyboardSelection } from '../selection';
@@ -20,6 +22,7 @@
   let entries: RemoteFileDTO[] = [];
   let loading = false;
   let error = '';
+  let deleting = false;
   let query = '';
   let selected: string[] = [];
   let anchor = -1;
@@ -30,6 +33,10 @@
   let back: string[] = [];
   let forward: string[] = [];
   let loadGeneration = 0;
+  const pendingDirectoryLoads = new Map<string, Promise<RemoteFileDTO[]>>();
+  onDestroy(() => {
+    loadGeneration++;
+  });
   $: connection = $connections.find((c) => String(c.id) === connectionId);
   $: currentPath = connection
     ? $remotePathByConnection[connection.id] || connection.remoteRoot || '/'
@@ -78,16 +85,32 @@
     focusIndex = -1;
     lastLoad = '';
   }
-  async function loadDirectory(id: string, p: string) {
-    const key = id + '|' + p;
-    if (lastLoad === key || !$connections.length) return;
+  async function loadDirectory(id: string, p: string, force = false) {
+    const requestedPath = p.replace(/\/+$/, '') || '/';
+    const key = id + '|' + requestedPath;
+    if ((!force && lastLoad === key) || !$connections.length) return;
     lastLoad = key;
     const generation = ++loadGeneration;
     loading = true;
     error = '';
     selected = [];
     try {
-      const result = await listRemoteDirectory(Number(id), p);
+      // Coalesce rapid back/forward clicks before they become FTP requests.
+      // A refresh bypasses this delay and starts a fresh listing immediately.
+      if (!force) await new Promise<void>((resolve) => setTimeout(resolve, 120));
+      if (generation !== loadGeneration) return;
+      let request = force ? undefined : pendingDirectoryLoads.get(key);
+      if (!request) {
+        let pending!: Promise<RemoteFileDTO[]>;
+        pending = listRemoteDirectory(Number(id), requestedPath).finally(() => {
+          if (pendingDirectoryLoads.get(key) === pending) {
+            pendingDirectoryLoads.delete(key);
+          }
+        });
+        pendingDirectoryLoads.set(key, pending);
+        request = pending;
+      }
+      const result = await request;
       if (generation === loadGeneration) entries = Array.isArray(result) ? result : [];
     } catch (e: any) {
       if (generation === loadGeneration) {
@@ -139,10 +162,6 @@
     if (e.isDir) setPath(e.path);
   }
   function choose(e: RemoteFileDTO, event: MouseEvent) {
-    if (e.isDir) {
-      open(e);
-      return;
-    }
     const i = filtered.findIndex((x) => x.path === e.path);
     const result = pointerSelection(filtered, selected, anchor, i, event);
     selected = result.selected;
@@ -176,7 +195,10 @@
       event.key.toLowerCase() === 'a'
     ) {
       event.preventDefault();
-      selected = filtered.filter((x) => !x.isDir).map((x) => x.path);
+      selected = filtered.map((x) => x.path);
+    } else if (event.key === 'Delete' && selected.length > 0) {
+      event.preventDefault();
+      deleteSelected();
     } else if (event.key === 'Enter' && focusIndex >= 0) {
       open(filtered[focusIndex]);
     } else if (event.key === 'Escape') {
@@ -192,21 +214,92 @@
     return `${downloadDir.replace(/[\\/]$/, '')}\\${rel.replaceAll('/', '\\')}`;
   }
   async function download(paths = selected) {
+    let count = 0;
     for (const p of paths) {
       const f = entries.find((x) => x.path === p);
-      if (!f || f.isDir) continue;
+      if (!f) continue;
       try {
-        await queueDownload(
-          Number(connectionId),
-          p,
-          localDestination(p),
-          f.sizeKnown ? f.size : 0
-        );
+        if (f.isDir) {
+          const jobs = await queueDownloadDirectory(Number(connectionId), p);
+          count += jobs.length;
+        } else {
+          await queueDownload(
+            Number(connectionId),
+            p,
+            localDestination(p),
+            f.sizeKnown ? f.size : 0
+          );
+          count++;
+        }
       } catch (e: any) {
         addToast('error', `Could not queue ${p}: ${e.message}`);
       }
     }
-    if (paths.length) addToast('info', `${paths.length} file(s) queued`);
+    if (count > 0) addToast('info', `${count} file(s) queued for download`);
+  }
+  async function deleteEntry(e: RemoteFileDTO) {
+    if (!connection || deleting) return;
+    const name = e.path.split('/').pop() || e.path;
+    const msg = e.isDir
+      ? `Are you sure you want to permanently delete folder "${name}" and all of its contents?`
+      : `Are you sure you want to permanently delete file "${name}"?`;
+    if (!confirm(msg)) return;
+
+    deleting = true;
+    try {
+      await deleteRemoteEntry(connection.id, e.path, e.isDir);
+      addToast('success', `Deleted ${name}`);
+      selected = selected.filter((p) => p !== e.path);
+      refresh();
+    } catch (err: any) {
+      addToast('error', `Failed to delete ${name}: ${err?.message || err}`);
+      refresh();
+    } finally {
+      deleting = false;
+    }
+  }
+  async function deleteSelected() {
+    if (!connection || !selected.length || deleting) return;
+    const itemsToDelete: { path: string; isDir: boolean }[] = [];
+    for (const p of selected) {
+      const found = entries.find((x) => x.path === p);
+      if (found) {
+        itemsToDelete.push({ path: found.path, isDir: found.isDir });
+      }
+    }
+    if (!itemsToDelete.length) return;
+
+    const hasFolder = itemsToDelete.some((x) => x.isDir);
+    let msg = '';
+    if (itemsToDelete.length === 1) {
+      const item = itemsToDelete[0];
+      const name = item.path.split('/').pop() || item.path;
+      msg = item.isDir
+        ? `Are you sure you want to permanently delete folder "${name}" and all of its contents?`
+        : `Are you sure you want to permanently delete "${name}"?`;
+    } else {
+      msg = hasFolder
+        ? `Are you sure you want to permanently delete ${itemsToDelete.length} selected items (including all folder contents)?`
+        : `Are you sure you want to permanently delete ${itemsToDelete.length} selected files?`;
+    }
+
+    if (!confirm(msg)) return;
+
+    deleting = true;
+    try {
+      await deleteRemoteEntries(connection.id, itemsToDelete);
+      addToast(
+        'success',
+        `Successfully deleted ${itemsToDelete.length} item(s)`
+      );
+      selected = [];
+      refresh();
+    } catch (err: any) {
+      addToast('error', `Failed to delete: ${err?.message || err}`);
+      refresh();
+    } finally {
+      deleting = false;
+    }
   }
   async function upload() {
     if (!connection) return;
@@ -257,7 +350,7 @@
   }
   function refresh() {
     lastLoad = '';
-    loadDirectory(connectionId, currentPath);
+    loadDirectory(connectionId, currentPath, true);
   }
   function clearIfEmpty(event: MouseEvent) {
     const target = event.target;
@@ -339,7 +432,11 @@
     ><button
       class="btn btn-primary btn-sm"
       on:click={() => download()}
-      disabled={!selected.length}><Icon name="download" size={14} /> Download selected</button
+      disabled={!selected.length || deleting}><Icon name="download" size={14} /> Download selected</button
+    ><button
+      class="btn btn-danger btn-sm"
+      on:click={deleteSelected}
+      disabled={!selected.length || deleting}><Icon name="trash" size={14} /> Delete selected</button
     >
   </div>
   {#if loading}<div class="files-state">
@@ -387,16 +484,26 @@
                 >{f.isDir || !f.sizeKnown ? '—' : formatSize(f.size)}</td
               ><td
                 >{f.modified ? new Date(f.modified).toLocaleString() : '—'}</td
-              ><td
+              ><td style="text-align: right; white-space: nowrap;"
                 >{#if f.isDir}<button
                     class="text-button"
+                    title="Download folder"
+                    aria-label={`Download folder ${f.path}`}
                     on:click|stopPropagation={() => downloadFolder(f)}
                     ><Icon name="download" size={13} /></button
                   >{:else}<button
                     class="text-button"
+                    title="Download file"
+                    aria-label={`Download file ${f.path}`}
                     on:click|stopPropagation={() => download([f.path])}
                     ><Icon name="download" size={13} /></button
-                  >{/if}</td
+                  >{/if}<button
+                    class="text-button text-button-danger"
+                    title={f.isDir ? 'Delete folder recursively' : 'Delete file'}
+                    aria-label={f.isDir ? `Delete folder ${f.path}` : `Delete file ${f.path}`}
+                    on:click|stopPropagation={() => deleteEntry(f)}
+                    ><Icon name="trash" size={13} /></button
+                ></td
               ></tr
             >{/each}</tbody
         >

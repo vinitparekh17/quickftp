@@ -11,6 +11,10 @@ export function DeleteConnection(arg1:number):Promise<void>;
 
 export function DeleteProject(arg1:number):Promise<void>;
 
+export function DeleteRemoteEntries(arg1:number,arg2:Array<main.RemoteDeleteItem>):Promise<void>;
+
+export function DeleteRemoteEntry(arg1:number,arg2:string,arg3:boolean):Promise<void>;
+
 export function GetConnections():Promise<Array<main.ConnectionDTO>>;
 
 export function GetDeployment(arg1:number):Promise<main.DeploymentDTO>;

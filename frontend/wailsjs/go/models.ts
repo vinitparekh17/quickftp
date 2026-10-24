@@ -140,6 +140,20 @@ export namespace main {
 	        this.artifactRulesJson = source["artifactRulesJson"];
 	    }
 	}
+	export class RemoteDeleteItem {
+	    path: string;
+	    isDir: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new RemoteDeleteItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.isDir = source["isDir"];
+	    }
+	}
 	export class SettingsDTO {
 	    backupDir: string;
 	    downloadDir: string;

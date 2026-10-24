@@ -1253,6 +1253,12 @@ td {
   cursor: pointer;
   padding: 7px 0 7px 10px;
 }
+.text-button-danger {
+  color: var(--color-danger, #ef4444);
+}
+.text-button-danger:hover {
+  color: var(--color-danger-hover, #dc2626);
+}
 .text-button span {
   margin-left: 4px;
 }

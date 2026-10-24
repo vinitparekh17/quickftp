@@ -40,10 +40,10 @@ const rows = [
       metaKey: false,
       shiftKey: true,
     }),
-    { selected: ['/root/a', '/root/b', '/root/c'], anchor: 0 }
+    { selected: ['/root/a', '/root/folder', '/root/b', '/root/c'], anchor: 0 }
   );
   assert.deepEqual(keyboardSelection(rows, ['/root/a'], 0, 3, true), {
-    selected: ['/root/a', '/root/b', '/root/c'],
+    selected: ['/root/a', '/root/folder', '/root/b', '/root/c'],
     anchor: 0,
   });
 }
@@ -54,7 +54,7 @@ const rows = [
       metaKey: false,
       shiftKey: true,
     }),
-    { selected: ['/root/c', '/root/a', '/root/b'], anchor: 0 }
+    { selected: ['/root/c', '/root/a', '/root/folder', '/root/b'], anchor: 0 }
   );
   assert.deepEqual(
     pointerSelection(rows, ['/root/a'], 0, 1, {
@@ -62,9 +62,9 @@ const rows = [
       metaKey: false,
       shiftKey: false,
     }),
-    { selected: ['/root/a'], anchor: 0 }
+    { selected: ['/root/folder'], anchor: 1 }
   );
 }
 console.log(
-  'Selection tests passed: single, Ctrl, Shift, Shift+Ctrl, keyboard range, directory exclusion.'
+  'Selection tests passed: single, Ctrl, Shift, Shift+Ctrl, keyboard range, folder inclusion.'
 );

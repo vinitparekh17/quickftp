@@ -18,6 +18,14 @@ export function DeleteProject(arg1) {
   return window['go']['main']['App']['DeleteProject'](arg1);
 }
 
+export function DeleteRemoteEntries(arg1, arg2) {
+  return window['go']['main']['App']['DeleteRemoteEntries'](arg1, arg2);
+}
+
+export function DeleteRemoteEntry(arg1, arg2, arg3) {
+  return window['go']['main']['App']['DeleteRemoteEntry'](arg1, arg2, arg3);
+}
+
 export function GetConnections() {
   return window['go']['main']['App']['GetConnections']();
 }

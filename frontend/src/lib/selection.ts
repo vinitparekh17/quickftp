@@ -1,6 +1,6 @@
 export interface SelectableRow {
   path: string;
-  isDir: boolean;
+  isDir?: boolean;
 }
 export interface SelectionResult {
   selected: string[];
@@ -15,13 +15,12 @@ export function pointerSelection(
   modifiers: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }
 ): SelectionResult {
   const row = rows[index];
-  if (!row || row.isDir) return { selected, anchor };
+  if (!row) return { selected, anchor };
   if (modifiers.shiftKey && anchor >= 0) {
     const a = Math.min(anchor, index),
       b = Math.max(anchor, index);
     const range = rows
       .slice(a, b + 1)
-      .filter((x) => !x.isDir)
       .map((x) => x.path);
     return {
       selected:
@@ -49,14 +48,13 @@ export function keyboardSelection(
   shiftKey: boolean
 ): SelectionResult {
   const row = rows[index];
-  if (!row || row.isDir) return { selected, anchor };
+  if (!row) return { selected, anchor };
   if (shiftKey && anchor >= 0) {
     const a = Math.min(anchor, index),
       b = Math.max(anchor, index);
     return {
       selected: rows
         .slice(a, b + 1)
-        .filter((x) => !x.isDir)
         .map((x) => x.path),
       anchor,
     };
