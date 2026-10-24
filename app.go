@@ -105,16 +105,18 @@ type SettingsDTO struct {
 
 // App holds the application state shared with the Wails runtime.
 type App struct {
-	ctx          context.Context
-	db           *storage.DB
-	creds        creds.Store
-	service      *deploy.Service
-	deployMu     sync.Mutex
-	deployCancel context.CancelFunc
-	settingsPath string
-	activity     *transfer.ActivityManager
-	gate         *transfer.Gate
-	settings     SettingsDTO
+	ctx             context.Context
+	db              *storage.DB
+	creds           creds.Store
+	service         *deploy.Service
+	deployMu        sync.Mutex
+	deployCancel    context.CancelFunc
+	settingsPath    string
+	activity        *transfer.ActivityManager
+	gate            *transfer.Gate
+	settings        SettingsDTO
+	explorerMu      sync.Mutex
+	explorerClients map[int64]*transfer.FTPClient
 }
 
 // startup is called by Wails after the frontend is ready.
@@ -245,6 +247,15 @@ func (a *App) SaveSettings(settings SettingsDTO) error {
 
 // shutdown is called by Wails when the application is closing.
 func (a *App) shutdown(_ context.Context) {
+	a.explorerMu.Lock()
+	for id, cl := range a.explorerClients {
+		if cl != nil {
+			_ = cl.Close()
+		}
+		delete(a.explorerClients, id)
+	}
+	a.explorerMu.Unlock()
+
 	if a.db != nil {
 		_ = a.db.Close()
 	}
@@ -289,6 +300,16 @@ func (a *App) SaveConnection(dto ConnectionDTO) error {
 			return fmt.Errorf("save credential: %w", err)
 		}
 	}
+	if dto.ID > 0 {
+		a.explorerMu.Lock()
+		if a.explorerClients != nil {
+			if cl, ok := a.explorerClients[dto.ID]; ok && cl != nil {
+				_ = cl.Close()
+				delete(a.explorerClients, dto.ID)
+			}
+		}
+		a.explorerMu.Unlock()
+	}
 	return nil
 }
 
@@ -309,6 +330,14 @@ func (a *App) DeleteConnection(id int64) error {
 	if err := a.db.DeleteConnection(id); err != nil {
 		return err
 	}
+	a.explorerMu.Lock()
+	if a.explorerClients != nil {
+		if cl, ok := a.explorerClients[id]; ok && cl != nil {
+			_ = cl.Close()
+			delete(a.explorerClients, id)
+		}
+	}
+	a.explorerMu.Unlock()
 	if targetKey != "" {
 		_ = a.creds.DeletePassword(targetKey) // best-effort
 	}
@@ -488,14 +517,12 @@ func (a *App) ListRemoteDirectory(connectionID int64, remotePath string) ([]tran
 		return nil, err
 	}
 	remotePath = path.Clean("/" + remotePath)
-	client, err := a.ftpClient(c)
+	client, err := a.explorerClient(c)
 	if err != nil {
 		return nil, err
 	}
 	a.activity.RecordLog("INFO", "Listing "+remotePath)
-	ctx, cancel := context.WithTimeout(a.ctx, 45*time.Second)
-	defer cancel()
-	files, err := client.ListDirectory(ctx, remotePath)
+	files, err := client.ListDirectory(a.ctx, remotePath)
 	if err != nil {
 		a.activity.RecordLog("ERROR", "Listing "+remotePath+": "+err.Error())
 		return nil, err
@@ -516,7 +543,7 @@ func (a *App) QueueDownload(connectionID int64, remotePath, localPath string, si
 		return transfer.Activity{}, err
 	}
 	remotePath = path.Clean("/" + remotePath)
-	client, err := a.ftpClient(c)
+	client, err := a.explorerClient(c)
 	if err != nil {
 		return transfer.Activity{}, err
 	}
@@ -531,7 +558,7 @@ func (a *App) QueueDownloadDirectory(connectionID int64, remotePath string) ([]t
 		return nil, e
 	}
 	remotePath = path.Clean("/" + remotePath)
-	client, e := a.ftpClient(c)
+	client, e := a.explorerClient(c)
 	if e != nil {
 		return nil, e
 	}
@@ -602,7 +629,7 @@ func (a *App) QueueUpload(connectionID int64, localPath, remotePath string) (tra
 		return transfer.Activity{}, e
 	}
 	remotePath = path.Clean("/" + remotePath)
-	client, e := a.ftpClient(c)
+	client, e := a.explorerClient(c)
 	if e != nil {
 		return transfer.Activity{}, e
 	}
@@ -617,7 +644,7 @@ func (a *App) QueueUploadDirectory(connectionID int64, localDir, remotePath stri
 		return nil, e
 	}
 	remotePath = path.Clean("/" + remotePath)
-	client, e := a.ftpClient(c)
+	client, e := a.explorerClient(c)
 	if e != nil {
 		return nil, e
 	}
@@ -663,7 +690,7 @@ func (a *App) RetryTransfer(id string) error {
 			if e != nil {
 				return fmt.Errorf("read connection credential for retry: %w", e)
 			}
-			client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: x.Profile.Host, Port: x.Profile.Port, Protocol: storage.Protocol(x.Profile.Protocol), Username: x.Profile.Username, Password: pw, TLSVerify: x.Profile.TLSVerify, CredentialKey: x.Profile.CredentialKey}}
+			client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: x.Profile.Host, Port: x.Profile.Port, Protocol: storage.Protocol(x.Profile.Protocol), Username: x.Profile.Username, Password: pw, TLSVerify: x.Profile.TLSVerify, CredentialKey: x.Profile.CredentialKey, ReuseConnection: true}}
 			return a.activity.Retry(id, client)
 		}
 	}
@@ -686,7 +713,87 @@ func (a *App) ftpClient(c *storage.Connection) (*transfer.FTPClient, error) {
 	if e != nil {
 		return nil, fmt.Errorf("read connection credential: %w", e)
 	}
-	return &transfer.FTPClient{Config: transfer.FTPConfig{Host: c.Host, Port: c.Port, Protocol: c.Protocol, Username: c.Username, Password: pw, TLSVerify: c.TLSVerify, CredentialKey: c.CredTargetKey}}, nil
+	return &transfer.FTPClient{Config: transfer.FTPConfig{Host: c.Host, Port: c.Port, Protocol: c.Protocol, Username: c.Username, Password: pw, TLSVerify: c.TLSVerify, CredentialKey: c.CredTargetKey, ReuseConnection: true}}, nil
+}
+
+func (a *App) explorerClient(c *storage.Connection) (*transfer.FTPClient, error) {
+	a.explorerMu.Lock()
+	defer a.explorerMu.Unlock()
+
+	if a.explorerClients == nil {
+		a.explorerClients = make(map[int64]*transfer.FTPClient)
+	}
+	client, err := a.ftpClient(c)
+	if err != nil {
+		return nil, err
+	}
+	if existing := a.explorerClients[c.ID]; existing != nil {
+		old := existing.Config
+		fresh := client.Config
+		if old.Host == fresh.Host && old.Port == fresh.Port && old.Protocol == fresh.Protocol && old.Username == fresh.Username && old.Password == fresh.Password && old.TLSVerify == fresh.TLSVerify && old.CredentialKey == fresh.CredentialKey {
+			return existing, nil
+		}
+		_ = existing.Close()
+	}
+	a.explorerClients[c.ID] = client
+	return client, nil
+}
+
+type RemoteDeleteItem struct {
+	Path  string `json:"path"`
+	IsDir bool   `json:"isDir"`
+}
+
+// DeleteRemoteEntry removes a single remote file or directory (recursively if isDir is true).
+func (a *App) DeleteRemoteEntry(connectionID int64, remotePath string, isDir bool) error {
+	return a.DeleteRemoteEntries(connectionID, []RemoteDeleteItem{{Path: remotePath, IsDir: isDir}})
+}
+
+// DeleteRemoteEntries removes multiple remote files or directories (recursively if isDir is true).
+func (a *App) DeleteRemoteEntries(connectionID int64, items []RemoteDeleteItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	c, err := a.connectionByID(connectionID)
+	if err != nil {
+		return err
+	}
+	root := path.Clean("/" + c.RemoteRoot)
+	for _, item := range items {
+		clean := path.Clean("/" + item.Path)
+		if clean == "/" || clean == "." || clean == root {
+			return fmt.Errorf("cannot delete remote root directory %s", clean)
+		}
+		if err = safeExplorerPath(c.RemoteRoot, clean); err != nil {
+			return err
+		}
+	}
+	client, err := a.explorerClient(c)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Minute)
+	defer cancel()
+
+	for _, item := range items {
+		clean := path.Clean("/" + item.Path)
+		if item.IsDir {
+			a.activity.RecordLog("INFO", "Deleting remote directory recursively: "+clean)
+			if err := client.DeleteDirectory(ctx, clean); err != nil {
+				a.activity.RecordLog("ERROR", "Delete directory "+clean+": "+err.Error())
+				return fmt.Errorf("failed to delete folder %s: %w", path.Base(clean), err)
+			}
+		} else {
+			a.activity.RecordLog("INFO", "Deleting remote file: "+clean)
+			if err := client.Delete(ctx, clean); err != nil {
+				a.activity.RecordLog("ERROR", "Delete file "+clean+": "+err.Error())
+				return fmt.Errorf("failed to delete file %s: %w", path.Base(clean), err)
+			}
+		}
+		a.activity.RecordLog("INFO", "Deleted: "+clean)
+	}
+	return nil
 }
 func safeExplorerPath(root, p string) error {
 	if strings.Contains(p, "\\") || strings.ContainsRune(p, 0) {

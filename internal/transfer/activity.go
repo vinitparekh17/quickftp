@@ -198,6 +198,7 @@ func (m *ActivityManager) runUpload(ctx context.Context, a Activity) {
 		m.finish(a.ID, "Failed", errors.New("transfer connection unavailable"))
 		return
 	}
+	defer m.releaseClient(a.ID, client)
 	parent := filepath.ToSlash(filepath.Dir(a.RemotePath))
 	if parent == "." {
 		parent = "/"
@@ -218,7 +219,9 @@ func (m *ActivityManager) runUpload(ctx context.Context, a Activity) {
 	if policy == "" {
 		policy = "Ask"
 	}
+	didWait := false
 	if exists && policy == "Ask" {
+		didWait = true
 		m.update(a.ID, func(x *Activity) { x.Status = "Waiting"; x.Error = "Remote destination already exists" })
 		m.log("CONFLICT", a.RemotePath+" already exists remotely")
 		ch := make(chan string, 1)
@@ -255,10 +258,14 @@ func (m *ActivityManager) runUpload(ctx context.Context, a Activity) {
 			}
 		}
 	}
-	latest, verifyErr := client.ListDirectory(ctx, parent)
-	if verifyErr != nil {
-		m.finish(a.ID, "Failed", fmt.Errorf("could not recheck remote conflict: %w", verifyErr))
-		return
+	latest := listing
+	if didWait {
+		var verifyErr error
+		latest, verifyErr = client.ListDirectory(ctx, parent)
+		if verifyErr != nil {
+			m.finish(a.ID, "Failed", fmt.Errorf("could not recheck remote conflict: %w", verifyErr))
+			return
+		}
 	}
 	for _, f := range latest {
 		if f.Path == remote && policy != "Overwrite" {
@@ -323,6 +330,10 @@ func (m *ActivityManager) runUpload(ctx context.Context, a Activity) {
 	m.finish(a.ID, "Completed", nil)
 }
 func (m *ActivityManager) runDownload(ctx context.Context, a Activity) {
+	m.mu.Lock()
+	client := m.clients[a.ID]
+	m.mu.Unlock()
+	defer m.releaseClient(a.ID, client)
 	if err := os.MkdirAll(filepath.Dir(a.LocalPath), 0700); err != nil {
 		m.finish(a.ID, "Failed", err)
 		return
@@ -383,9 +394,6 @@ func (m *ActivityManager) runDownload(ctx context.Context, a Activity) {
 		m.update(a.ID, func(x *Activity) { x.Bytes = n })
 		m.log("PROGRESS", fmt.Sprintf("DOWNLOAD %s — %d / %d bytes", a.RemotePath, n, a.Total))
 	}}
-	m.mu.Lock()
-	client := m.clients[a.ID]
-	m.mu.Unlock()
 	if client == nil {
 		err = errors.New("transfer connection unavailable")
 	} else {
@@ -405,9 +413,10 @@ func (m *ActivityManager) runDownload(ctx context.Context, a Activity) {
 			_ = os.Remove(target)
 			publishErr = os.Rename(tmp, target)
 		} else {
-			publishErr = os.Link(tmp, target)
-			if publishErr == nil {
-				publishErr = os.Remove(tmp)
+			if _, statErr := os.Lstat(target); statErr == nil {
+				publishErr = errors.New("destination already exists")
+			} else {
+				publishErr = os.Rename(tmp, target)
 			}
 		}
 		if publishErr != nil {
@@ -463,6 +472,35 @@ func (m *ActivityManager) finish(id, status string, err error) {
 	}
 	m.log(level, fmt.Sprintf("%s %s — %s: %s", item.Direction, item.RemotePath, status, detail))
 }
+
+// releaseClient closes one-shot clients when their activity ends. Directory
+// uploads share an FTPClient across many activities, so keep that connection
+// alive until the last activity using it has finished.
+func (m *ActivityManager) releaseClient(id string, client ActivityClient) {
+	closer, ok := client.(io.Closer)
+	if !ok {
+		return
+	}
+	if ftpClient, ok := client.(*FTPClient); ok {
+		m.mu.Lock()
+		delete(m.clients, id)
+		inUse := false
+		for _, other := range m.clients {
+			if otherFTP, ok := other.(*FTPClient); ok && otherFTP == ftpClient {
+				inUse = true
+				break
+			}
+		}
+		m.mu.Unlock()
+		if inUse {
+			return
+		}
+		ftpClient.CloseWhenIdle(30 * time.Second)
+		return
+	}
+	_ = closer.Close()
+}
+
 func (m *ActivityManager) Cancel(id string) error {
 	m.mu.Lock()
 	c := m.cancels[id]
