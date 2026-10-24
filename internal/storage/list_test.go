@@ -80,7 +80,7 @@ func TestStorageListAndCRUD(t *testing.T) {
 		t.Fatalf("expected 0 projs after delete, got %d", len(projsAfter))
 	}
 
-	// 3. Test ListDeployments
+	// 3. Test ListDeployments, GetDeployment, and JournalFiles
 	if err := db.UpsertConnection(c1); err != nil {
 		t.Fatalf("UpsertConnection re-add failed: %v", err)
 	}
@@ -99,5 +99,41 @@ func TestStorageListAndCRUD(t *testing.T) {
 	}
 	if len(deps) != 1 || deps[0].ID != depID {
 		t.Fatalf("unexpected deployments: %+v", deps)
+	}
+
+	// 4. Test GetDeployment
+	singleDep, err := db.GetDeployment(depID)
+	if err != nil {
+		t.Fatalf("GetDeployment failed: %v", err)
+	}
+	if singleDep.ID != depID || singleDep.Status != "running" || singleDep.CurrentPhase != "planning" {
+		t.Fatalf("unexpected singleDep: %+v", singleDep)
+	}
+
+	// 5. Test JournalFile and GetDeploymentFiles (both filtered by stage and all stages when stage="")
+	if err := db.JournalFile(depID, "file1.txt", "upload", "verified", 100, "hash1", ""); err != nil {
+		t.Fatalf("JournalFile upload failed: %v", err)
+	}
+	if err := db.JournalFile(depID, "file2.bak", "backup", "verified", 200, "hash2", ""); err != nil {
+		t.Fatalf("JournalFile backup failed: %v", err)
+	}
+	if err := db.JournalFile(depID, "file3.old", "delete", "completed", 300, "", ""); err != nil {
+		t.Fatalf("JournalFile delete failed: %v", err)
+	}
+
+	uploads, err := db.GetDeploymentFiles(depID, "upload")
+	if err != nil {
+		t.Fatalf("GetDeploymentFiles(upload) failed: %v", err)
+	}
+	if len(uploads) != 1 || uploads[0].RelativePath != "file1.txt" {
+		t.Fatalf("unexpected uploads: %+v", uploads)
+	}
+
+	allFiles, err := db.GetDeploymentFiles(depID, "")
+	if err != nil {
+		t.Fatalf("GetDeploymentFiles(all) failed: %v", err)
+	}
+	if len(allFiles) != 3 {
+		t.Fatalf("expected 3 allFiles, got %d", len(allFiles))
 	}
 }
