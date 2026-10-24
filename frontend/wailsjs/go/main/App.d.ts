@@ -13,6 +13,8 @@ export function DeleteProject(arg1:number):Promise<void>;
 
 export function GetConnections():Promise<Array<main.ConnectionDTO>>;
 
+export function GetDeployment(arg1:number):Promise<main.DeploymentDTO>;
+
 export function GetDeploymentFiles(arg1:number,arg2:string):Promise<Array<main.DeploymentFileDTO>>;
 
 export function GetDeploymentHistory(arg1:number):Promise<Array<main.DeploymentDTO>>;

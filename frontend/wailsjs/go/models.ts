@@ -47,7 +47,14 @@ export namespace main {
 	export class DeploymentDTO {
 	    id: number;
 	    projectId: number;
+	    projectName: string;
+	    projectType: string;
 	    connectionId: number;
+	    connectionName: string;
+	    connectionHost: string;
+	    remoteRoot: string;
+	    buildCommand: string;
+	    outputRelPath: string;
 	    status: string;
 	    currentPhase: string;
 	    backupDir: string;
@@ -64,7 +71,14 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.projectId = source["projectId"];
+	        this.projectName = source["projectName"];
+	        this.projectType = source["projectType"];
 	        this.connectionId = source["connectionId"];
+	        this.connectionName = source["connectionName"];
+	        this.connectionHost = source["connectionHost"];
+	        this.remoteRoot = source["remoteRoot"];
+	        this.buildCommand = source["buildCommand"];
+	        this.outputRelPath = source["outputRelPath"];
 	        this.status = source["status"];
 	        this.currentPhase = source["currentPhase"];
 	        this.backupDir = source["backupDir"];

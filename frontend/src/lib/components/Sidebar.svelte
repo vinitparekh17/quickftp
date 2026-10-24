@@ -27,15 +27,6 @@
 
     <button
       class="sidebar-nav-item"
-      class:active={$currentPage === 'deploy'}
-      on:click={() => setPage('deploy')}
-    >
-      <Icon name="deploy" size={18} />
-      <span>Deploy</span>
-    </button>
-
-    <button
-      class="sidebar-nav-item"
       class:active={$currentPage === 'files'}
       on:click={() => setPage('files')}
     >
@@ -63,11 +54,11 @@
 
     <button
       class="sidebar-nav-item"
-      class:active={$currentPage === 'history'}
+      class:active={$currentPage === 'history' || $currentPage === 'deploy'}
       on:click={() => setPage('history')}
     >
-      <Icon name="history" size={18} />
-      <span>History</span>
+      <Icon name="deploy" size={18} />
+      <span>Deployments</span>
       {#if $pendingDeployments.length > 0}
         <span
           class="badge badge-warning"

@@ -53,16 +53,23 @@ type ProjectDTO struct {
 
 // DeploymentDTO is the frontend-safe representation of a deployment record.
 type DeploymentDTO struct {
-	ID           int64  `json:"id"`
-	ProjectID    int64  `json:"projectId"`
-	ConnectionID int64  `json:"connectionId"`
-	Status       string `json:"status"`
-	CurrentPhase string `json:"currentPhase"`
-	BackupDir    string `json:"backupDir"`
-	ErrorMessage string `json:"errorMessage"`
-	StartedAt    string `json:"startedAt"`
-	FinishedAt   string `json:"finishedAt"`
-	Cancelled    bool   `json:"cancelled"`
+	ID             int64  `json:"id"`
+	ProjectID      int64  `json:"projectId"`
+	ProjectName    string `json:"projectName"`
+	ProjectType    string `json:"projectType"`
+	ConnectionID   int64  `json:"connectionId"`
+	ConnectionName string `json:"connectionName"`
+	ConnectionHost string `json:"connectionHost"`
+	RemoteRoot     string `json:"remoteRoot"`
+	BuildCommand   string `json:"buildCommand"`
+	OutputRelPath  string `json:"outputRelPath"`
+	Status         string `json:"status"`
+	CurrentPhase   string `json:"currentPhase"`
+	BackupDir      string `json:"backupDir"`
+	ErrorMessage   string `json:"errorMessage"`
+	StartedAt      string `json:"startedAt"`
+	FinishedAt     string `json:"finishedAt"`
+	Cancelled      bool   `json:"cancelled"`
 }
 
 // DeploymentFileDTO is the frontend-safe representation of a deployment file journal entry.
@@ -753,9 +760,19 @@ func (a *App) GetDeploymentHistory(limit int) ([]DeploymentDTO, error) {
 	}
 	out := make([]DeploymentDTO, len(deps))
 	for i, d := range deps {
-		out[i] = deploymentToDTO(d)
+		out[i] = a.deploymentToDTO(d)
 	}
 	return out, nil
+}
+
+// GetDeployment returns a single deployment by ID with its resolved configuration metadata.
+func (a *App) GetDeployment(id int64) (*DeploymentDTO, error) {
+	d, err := a.db.GetDeployment(id)
+	if err != nil {
+		return nil, err
+	}
+	dto := a.deploymentToDTO(*d)
+	return &dto, nil
 }
 
 // GetPendingDeployments returns all currently running deployments.
@@ -766,7 +783,7 @@ func (a *App) GetPendingDeployments() ([]DeploymentDTO, error) {
 	}
 	out := make([]DeploymentDTO, len(deps))
 	for i, d := range deps {
-		out[i] = deploymentToDTO(d)
+		out[i] = a.deploymentToDTO(d)
 	}
 	return out, nil
 }
@@ -814,7 +831,7 @@ func projectToDTO(p storage.Project) ProjectDTO {
 	}
 }
 
-func deploymentToDTO(d storage.Deployment) DeploymentDTO {
+func (a *App) deploymentToDTO(d storage.Deployment) DeploymentDTO {
 	errMsg := ""
 	if d.ErrorMessage.Valid {
 		errMsg = d.ErrorMessage.String
@@ -823,7 +840,7 @@ func deploymentToDTO(d storage.Deployment) DeploymentDTO {
 	if d.FinishedAt.Valid {
 		finished = d.FinishedAt.Time.Format(time.RFC3339)
 	}
-	return DeploymentDTO{
+	dto := DeploymentDTO{
 		ID:           d.ID,
 		ProjectID:    d.ProjectID,
 		ConnectionID: d.ConnectionID,
@@ -835,6 +852,24 @@ func deploymentToDTO(d storage.Deployment) DeploymentDTO {
 		FinishedAt:   finished,
 		Cancelled:    strings.Contains(errMsg, context.Canceled.Error()),
 	}
+
+	if a.db != nil {
+		var p storage.Project
+		if err := a.db.Conn.QueryRow(`SELECT name, project_type, build_cmd, output_rel_path FROM projects WHERE id=?`, d.ProjectID).Scan(&p.Name, &p.Type, &p.BuildCommand, &p.OutputRelPath); err == nil {
+			dto.ProjectName = p.Name
+			dto.ProjectType = p.Type
+			dto.BuildCommand = p.BuildCommand
+			dto.OutputRelPath = p.OutputRelPath
+		}
+		var c storage.Connection
+		if err := a.db.Conn.QueryRow(`SELECT name, host, remote_root FROM connections WHERE id=?`, d.ConnectionID).Scan(&c.Name, &c.Host, &c.RemoteRoot); err == nil {
+			dto.ConnectionName = c.Name
+			dto.ConnectionHost = c.Host
+			dto.RemoteRoot = c.RemoteRoot
+		}
+	}
+
+	return dto
 }
 
 func deploymentFileToDTO(f storage.DeploymentFile) DeploymentFileDTO {

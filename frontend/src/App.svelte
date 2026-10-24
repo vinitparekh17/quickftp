@@ -1,4 +1,4 @@
-﻿<script lang="ts">
+<script lang="ts">
   import Icon from './lib/components/Icon.svelte';
   import { onMount } from 'svelte';
   import {
@@ -17,7 +17,6 @@
   import ConnectionList from './lib/components/ConnectionList.svelte';
   import ProjectList from './lib/components/ProjectList.svelte';
   import DeployView from './lib/components/DeployView.svelte';
-  import HistoryView from './lib/components/HistoryView.svelte';
   import RecoveryBanner from './lib/components/RecoveryBanner.svelte';
   import Dashboard from './lib/components/Dashboard.svelte';
   import SettingsView from './lib/components/SettingsView.svelte';
@@ -29,6 +28,7 @@
     const unsubLog = onEvent(
       'deploy:log',
       (data: { stream: string; line: string }) => {
+        const line = String(data?.line ?? '');
         const stamp = new Date().toLocaleTimeString([], {
           hour: '2-digit',
           minute: '2-digit',
@@ -36,8 +36,18 @@
         });
         deployLogs.update((logs) => [
           ...logs,
-          { ...data, line: `${stamp}  ${data.line}` },
+          { ...data, line: `${stamp}  ${line}` },
         ]);
+
+        // Keep the visible pipeline aligned with transfer logs if phase events
+        // arrive late or are missed by the frontend event bridge.
+        if (line.startsWith('Uploading ')) deployPhase.set('upload');
+        else if (line.startsWith('Upload verified '))
+          deployPhase.set('verify_upload');
+        else if (line.startsWith('Backup verified '))
+          deployPhase.set('verify_backup');
+        else if (line.startsWith('Removing stale '))
+          deployPhase.set('delete');
       }
     );
 
@@ -45,7 +55,6 @@
       'deploy:started',
       (data: { project: string; connection: string }) => {
         deployStatus.set('running');
-        deployPhase.set('planning');
       }
     );
 
@@ -74,6 +83,18 @@
       (data: { deploymentId: number; error: string }) => {
         deployStatus.set('failed');
         activeDeploymentId.set(data.deploymentId);
+        const stamp = new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        });
+        deployLogs.update((logs) => [
+          ...logs,
+          {
+            stream: 'stderr',
+            line: `${stamp}  Deployment #${data.deploymentId} failed: ${data.error}`,
+          },
+        ]);
         addToast(
           'error',
           `Deployment #${data.deploymentId} failed: ${data.error}`
@@ -186,10 +207,10 @@
         <ConnectionList />
       {:else if $currentPage === 'projects'}
         <ProjectList />
-      {:else if $currentPage === 'deploy'}
+
+
+      {:else if $currentPage === "history" || $currentPage === "deploy"}
         <DeployView />
-      {:else if $currentPage === 'history'}
-        <HistoryView />
       {:else if $currentPage === 'settings'}
         <SettingsView />
       {:else if $currentPage === 'files'}
@@ -213,4 +234,5 @@
     <span>{t.message}</span>
   </div>
 {/each}
+
 

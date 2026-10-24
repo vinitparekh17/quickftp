@@ -423,6 +423,13 @@ func (e *Engine) Rollback(ctx context.Context, deploymentID int64) error {
 	if d.Status != "failed" && d.Status != "running" {
 		return fmt.Errorf("deployment %d is %s and cannot be rolled back", deploymentID, d.Status)
 	}
+
+	// Safety check: rollback is only allowed for the most recent deployment on this connection.
+	// Rolling back an older deployment would overwrite subsequent deployments on the remote target.
+	var newerCount int
+	if err := e.DB.Conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM deployments WHERE connection_id = ? AND id > ?`, d.ConnectionID, deploymentID).Scan(&newerCount); err == nil && newerCount > 0 {
+		return fmt.Errorf("deployment %d cannot be rolled back because %d newer deployment(s) exist on this target", deploymentID, newerCount)
+	}
 	backups, err := e.DB.GetDeploymentFiles(deploymentID, "backup")
 	if err != nil {
 		return err

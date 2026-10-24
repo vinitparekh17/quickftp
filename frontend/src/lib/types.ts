@@ -26,8 +26,15 @@ export interface ProjectDTO {
 export interface DeploymentDTO {
   id: number;
   projectId: number;
+  projectName?: string;
+  projectType?: string;
   connectionId: number;
-  status: string; // running, completed, failed, rolled_back
+  connectionName?: string;
+  connectionHost?: string;
+  remoteRoot?: string;
+  buildCommand?: string;
+  outputRelPath?: string;
+  status: string; // running, completed, failed, rolled_back, cancelled, interrupted
   currentPhase: string;
   backupDir: string;
   errorMessage: string;
@@ -35,6 +42,17 @@ export interface DeploymentDTO {
   finishedAt: string;
   cancelled?: boolean;
 }
+
+export type DeploymentExecutionStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+  | 'rolling_back'
+  | 'rolled_back'
+  | 'rollback_failed';
 
 export interface DeploymentFileDTO {
   id: number;

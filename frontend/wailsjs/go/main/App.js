@@ -22,6 +22,10 @@ export function GetConnections() {
   return window['go']['main']['App']['GetConnections']();
 }
 
+export function GetDeployment(arg1) {
+  return window['go']['main']['App']['GetDeployment'](arg1);
+}
+
 export function GetDeploymentFiles(arg1, arg2) {
   return window['go']['main']['App']['GetDeploymentFiles'](arg1, arg2);
 }

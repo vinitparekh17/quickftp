@@ -119,7 +119,14 @@ const mockDeployments: DeploymentDTO[] = [
   {
     id: 1,
     projectId: 1,
+    projectName: 'Customer Portal',
+    projectType: 'angular',
     connectionId: 1,
+    connectionName: 'Production Server',
+    connectionHost: 'ftp.example.com',
+    remoteRoot: '/var/www/html',
+    buildCommand: 'ng build --configuration production',
+    outputRelPath: 'dist/customer-portal',
     status: 'completed',
     currentPhase: 'done',
     backupDir: '/backups/20241010_143022',
@@ -130,7 +137,14 @@ const mockDeployments: DeploymentDTO[] = [
   {
     id: 2,
     projectId: 2,
+    projectName: 'Admin API',
+    projectType: 'dotnet',
     connectionId: 1,
+    connectionName: 'Production Server',
+    connectionHost: 'ftp.example.com',
+    remoteRoot: '/var/www/html',
+    buildCommand: 'dotnet publish -c Release',
+    outputRelPath: 'bin/Release/net8.0/publish',
     status: 'failed',
     currentPhase: 'upload',
     backupDir: '/backups/20241011_091000',
@@ -141,7 +155,14 @@ const mockDeployments: DeploymentDTO[] = [
   {
     id: 3,
     projectId: 1,
+    projectName: 'Customer Portal',
+    projectType: 'angular',
     connectionId: 2,
+    connectionName: 'Staging Server',
+    connectionHost: 'staging.example.com',
+    remoteRoot: '/wwwroot',
+    buildCommand: 'ng build --configuration production',
+    outputRelPath: 'dist/customer-portal',
     status: 'completed',
     currentPhase: 'done',
     backupDir: '/backups/20241012_160000',
@@ -152,7 +173,14 @@ const mockDeployments: DeploymentDTO[] = [
   {
     id: 4,
     projectId: 3,
+    projectName: 'Marketing Site',
+    projectType: 'angular',
     connectionId: 2,
+    connectionName: 'Staging Server',
+    connectionHost: 'staging.example.com',
+    remoteRoot: '/wwwroot',
+    buildCommand: 'npm run build',
+    outputRelPath: 'dist/marketing',
     status: 'rolled_back',
     currentPhase: 'rollback',
     backupDir: '/backups/20241013_110500',
@@ -163,7 +191,14 @@ const mockDeployments: DeploymentDTO[] = [
   {
     id: 5,
     projectId: 2,
+    projectName: 'Admin API',
+    projectType: 'dotnet',
     connectionId: 1,
+    connectionName: 'Production Server',
+    connectionHost: 'ftp.example.com',
+    remoteRoot: '/var/www/html',
+    buildCommand: 'dotnet publish -c Release',
+    outputRelPath: 'bin/Release/net8.0/publish',
     status: 'completed',
     currentPhase: 'done',
     backupDir: '/backups/20241014_080000',
@@ -569,6 +604,17 @@ export async function getDeploymentHistory(
   }
   await delay(200);
   return [...mockDeployments].slice(0, limit);
+}
+
+export async function getDeployment(
+  id: number
+): Promise<DeploymentDTO | null> {
+  if (isWails) {
+    return await window.go.main.App.GetDeployment(id);
+  }
+  await delay(100);
+  const dep = mockDeployments.find((d) => d.id === id);
+  return dep ? { ...dep } : null;
 }
 
 export async function getPendingDeployments(): Promise<DeploymentDTO[]> {

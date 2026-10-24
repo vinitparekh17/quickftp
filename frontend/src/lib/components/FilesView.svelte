@@ -34,7 +34,7 @@
   $: currentPath = connection
     ? $remotePathByConnection[connection.id] || connection.remoteRoot || '/'
     : '/';
-  $: filtered = entries
+  $: filtered = (entries || [])
     .filter((e) =>
       e.path.split('/').pop()?.toLowerCase().includes(query.toLowerCase())
     )
@@ -88,7 +88,7 @@
     selected = [];
     try {
       const result = await listRemoteDirectory(Number(id), p);
-      if (generation === loadGeneration) entries = result;
+      if (generation === loadGeneration) entries = Array.isArray(result) ? result : [];
     } catch (e: any) {
       if (generation === loadGeneration) {
         error = e?.message || 'Unable to list this directory';
@@ -380,7 +380,7 @@
               on:click={(e) => choose(f, e)}
               on:dblclick={() => open(f)}
               ><td
-                ><span class="file-icon"><Icon name={getFileIcon(f.path, f.isDir)} size={16} /></span>{f.path
+                ><span class="file-icon {f.isDir ? 'bg-yellow' : ''}"><Icon name={getFileIcon(f.path, f.isDir)} size={16} /></span>{f.path
                   .split('/')
                   .pop()}</td
               ><td>{f.isDir ? 'Directory' : 'File'}</td><td
@@ -391,11 +391,11 @@
                 >{#if f.isDir}<button
                     class="text-button"
                     on:click|stopPropagation={() => downloadFolder(f)}
-                    ><Icon name="download" size={13} /> Download folder</button
+                    ><Icon name="download" size={13} /></button
                   >{:else}<button
                     class="text-button"
                     on:click|stopPropagation={() => download([f.path])}
-                    ><Icon name="download" size={13} /> Download</button
+                    ><Icon name="download" size={13} /></button
                   >{/if}</td
               ></tr
             >{/each}</tbody

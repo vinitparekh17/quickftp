@@ -106,7 +106,13 @@ func (db *DB) GetDeployment(id int64) (*Deployment, error) {
 }
 
 func (db *DB) GetDeploymentFiles(id int64, stage string) ([]DeploymentFile, error) {
-	rows, err := db.Conn.Query(`SELECT id, deployment_id, relative_path, stage, status, size_bytes, sha256_local, error_detail, updated_at FROM deployment_files WHERE deployment_id=? AND stage=? ORDER BY id`, id, stage)
+	var rows *sql.Rows
+	var err error
+	if stage != "" {
+		rows, err = db.Conn.Query(`SELECT id, deployment_id, relative_path, stage, status, size_bytes, sha256_local, error_detail, updated_at FROM deployment_files WHERE deployment_id=? AND stage=? ORDER BY id`, id, stage)
+	} else {
+		rows, err = db.Conn.Query(`SELECT id, deployment_id, relative_path, stage, status, size_bytes, sha256_local, error_detail, updated_at FROM deployment_files WHERE deployment_id=? ORDER BY id`, id)
+	}
 	if err != nil {
 		return nil, err
 	}
