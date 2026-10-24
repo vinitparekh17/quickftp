@@ -267,7 +267,6 @@
             title="Refresh history"
           >
             <Icon name="refresh" size={14} spin={loading} />
-            <span>Refresh</span>
           </button>
         </div>
       </div>
