@@ -8,5 +8,5 @@ RUN apt-get update \
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 21 2121 2990 30000-30009
+EXPOSE 21 990 2121 30000-30009
 ENTRYPOINT ["/entrypoint.sh"]

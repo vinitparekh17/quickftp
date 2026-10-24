@@ -14,6 +14,9 @@ fi
 printf '%s:%s\n' "$FTP_USER" "$FTP_PASSWORD" | chpasswd
 chown -R root:root /srv/ftp
 chmod 755 /srv/ftp
+mkdir -p /var/run/vsftpd/empty
+chown root:root /var/run/vsftpd/empty
+chmod 555 /var/run/vsftpd/empty
 mkdir -p /srv/ftp/site/wwwroot
 chown -R "$FTP_USER":"$FTP_USER" /srv/ftp/site
 
@@ -46,13 +49,15 @@ force_local_logins_ssl=YES
 force_local_data_ssl=YES
 require_ssl_reuse=NO
 implicit_ssl=$FTP_IMPLICIT
+xferlog_enable=YES
+xferlog_std_format=NO
+vsftpd_log_file=/var/log/vsftpd.log
+debug_ssl=YES
 rsa_cert_file=/etc/ssl/certs/vsftpd.crt
 rsa_private_key_file=/etc/ssl/private/vsftpd.key
 ssl_sslv2=NO
 ssl_sslv3=NO
 ssl_tlsv1=YES
-ssl_tlsv1_1=NO
-ssl_tlsv1_2=YES
 EOF
 
 exec /usr/sbin/vsftpd /etc/vsftpd.conf

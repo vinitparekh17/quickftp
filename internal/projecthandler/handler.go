@@ -183,10 +183,14 @@ func matchArtifactPattern(name, pattern string) (bool, error) {
 	return match(0, 0)
 }
 func buildCommand(ctx context.Context, dir, command string) (*exec.Cmd, error) {
+	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		return exec.CommandContext(ctx, "cmd.exe", "/D", "/S", "/C", command), nil
+		cmd = exec.CommandContext(ctx, "cmd.exe", "/D", "/S", "/C", command)
+	} else {
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", command)
 	}
-	return exec.CommandContext(ctx, "/bin/sh", "-c", command), nil
+	cmd.Dir = dir
+	return cmd, nil
 }
 func streamLogs(cmd *exec.Cmd, log LogFunc) {
 	if log == nil {

@@ -21,7 +21,8 @@ func main() {
 	defer cancel()
 	port, _ := strconv.Atoi(env("QUICKFTP_FTP_PORT", "21"))
 	tlsVerify := env("QUICKFTP_FTP_TLS_VERIFY", "true") != "false"
-	client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: os.Getenv("QUICKFTP_FTP_HOST"), Port: port, Protocol: storage.Protocol(env("QUICKFTP_FTP_PROTOCOL", "ftps_explicit")), Username: os.Getenv("QUICKFTP_FTP_USERNAME"), Password: os.Getenv("QUICKFTP_FTP_PASSWORD"), TLSVerify: tlsVerify, Timeout: 15 * time.Second}}
+	client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: os.Getenv("QUICKFTP_FTP_HOST"), Port: port, Protocol: storage.Protocol(env("QUICKFTP_FTP_PROTOCOL", "ftps_explicit")), Username: os.Getenv("QUICKFTP_FTP_USERNAME"), Password: os.Getenv("QUICKFTP_FTP_PASSWORD"), TLSVerify: tlsVerify, Timeout: 15 * time.Second, ReuseConnection: true}}
+	defer client.Close()
 	if client.Config.Host == "" || client.Config.Username == "" || client.Config.Password == "" {
 		fatal("set QUICKFTP_FTP_HOST, QUICKFTP_FTP_USERNAME, and QUICKFTP_FTP_PASSWORD")
 	}
@@ -33,7 +34,8 @@ func main() {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		fatal("generate probe name: %v", err)
 	}
-	base := ".quickftp-spike-" + hex.EncodeToString(nonce[:])
+	// Keep the probe visible to servers whose default LIST omits dotfiles.
+	base := "quickftp-spike-" + hex.EncodeToString(nonce[:])
 	original, renamed := path.Join(root, base+".tmp"), path.Join(root, base+".renamed")
 	payload := []byte("QuickFTP FTP/FTPS transfer probe")
 	if err := client.Upload(ctx, original, bytes.NewReader(payload)); err != nil {

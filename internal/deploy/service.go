@@ -59,7 +59,8 @@ func (s *Service) DeployProject(ctx context.Context, projectName, connectionName
 	for i, a := range artifacts {
 		selected[i] = transfer.Artifact{LocalPath: a.LocalPath, RelativePath: a.RelativePath}
 	}
-	client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: connection.Host, Port: connection.Port, Protocol: connection.Protocol, Username: connection.Username, Password: password, TLSVerify: connection.TLSVerify}}
+	client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: connection.Host, Port: connection.Port, Protocol: connection.Protocol, Username: connection.Username, Password: password, TLSVerify: connection.TLSVerify, ReuseConnection: true}}
+	defer client.Close()
 	if s.PhaseLog != nil {
 		s.PhaseLog("planning")
 	}
@@ -94,6 +95,7 @@ func (s *Service) Rollback(ctx context.Context, deploymentID int64, connectionNa
 	if err != nil {
 		return fmt.Errorf("read connection credential: %w", err)
 	}
-	client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: connection.Host, Port: connection.Port, Protocol: connection.Protocol, Username: connection.Username, Password: password, TLSVerify: connection.TLSVerify}}
+	client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: connection.Host, Port: connection.Port, Protocol: connection.Protocol, Username: connection.Username, Password: password, TLSVerify: connection.TLSVerify, ReuseConnection: true}}
+	defer client.Close()
 	return (&transfer.Engine{DB: s.DB, Client: client, RemoteRoot: connection.RemoteRoot, Gate: s.Gate, ConnectionID: connection.ID, ConnectionName: connection.Name, OnFileTransfer: s.TransferFile}).Rollback(ctx, deploymentID)
 }

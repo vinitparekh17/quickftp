@@ -7,6 +7,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jlaffaye/ftp"
@@ -22,8 +23,13 @@ type FTPConfig struct {
 	TLSVerify          bool
 	Timeout            time.Duration
 	CredentialKey      string
+	ReuseConnection    bool
 }
-type FTPClient struct{ Config FTPConfig }
+type FTPClient struct {
+	Config FTPConfig
+	mu     sync.Mutex
+	conn   *ftp.ServerConn
+}
 
 func (c *FTPClient) dial(ctx context.Context) (*ftp.ServerConn, error) {
 	port := c.Config.Port
@@ -34,9 +40,9 @@ func (c *FTPClient) dial(ctx context.Context) (*ftp.ServerConn, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	opts := []ftp.DialOption{ftp.DialWithTimeout(timeout), ftp.DialWithContext(ctx)}
+	opts := []ftp.DialOption{ftp.DialWithTimeout(timeout), ftp.DialWithContext(ctx), ftp.DialWithShutTimeout(5 * time.Second)}
 	if c.Config.Protocol == storage.ProtocolFTPSExplicit {
-		tlsConfig := &tls.Config{ServerName: c.Config.Host, MinVersion: tls.VersionTLS12, InsecureSkipVerify: !c.Config.TLSVerify, ClientSessionCache: tls.NewLRUClientSessionCache(8)}
+		tlsConfig := &tls.Config{ServerName: c.Config.Host, MinVersion: tls.VersionTLS12, InsecureSkipVerify: !c.Config.TLSVerify}
 		if port == 990 {
 			opts = append(opts, ftp.DialWithTLS(tlsConfig))
 		} else {
@@ -56,16 +62,44 @@ func (c *FTPClient) dial(ctx context.Context) (*ftp.ServerConn, error) {
 	return conn, nil
 }
 func (c *FTPClient) with(ctx context.Context, fn func(*ftp.ServerConn) error) error {
-	conn, err := c.dial(ctx)
-	if err != nil {
-		return err
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	conn := c.conn
+	if conn == nil {
+		var err error
+		conn, err = c.dial(ctx)
+		if err != nil {
+			return err
+		}
+		if c.Config.ReuseConnection {
+			c.conn = conn
+		}
 	}
 	opErr := fn(conn)
+	if c.Config.ReuseConnection && opErr == nil {
+		return nil
+	}
+	if c.Config.ReuseConnection {
+		c.conn = nil
+	}
 	quitErr := conn.Quit()
 	if opErr != nil {
 		return opErr
 	}
 	return quitErr
+}
+
+// Close releases a connection retained when ReuseConnection is enabled.
+func (c *FTPClient) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn == nil {
+		return nil
+	}
+	conn := c.conn
+	c.conn = nil
+	return conn.Quit()
 }
 func (c *FTPClient) List(ctx context.Context, root string) ([]RemoteFile, error) {
 	var files []RemoteFile

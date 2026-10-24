@@ -36,12 +36,12 @@ services:
     environment:
       FTP_USER: quickftp
       FTP_PASSWORD: quickftp-test-only
-      FTP_PORT: 2990
+      FTP_PORT: 990
       FTP_IMPLICIT: "YES"
       PASV_MIN_PORT: 32000
       PASV_MAX_PORT: 32009
     ports:
-      - "990:2990"
+      - "990:990"
       - "32000-32009:32000-32009"
     volumes:
       - ftp-data:/srv/ftp
