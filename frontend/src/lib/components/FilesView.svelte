@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { connections, remotePathByConnection, addToast } from '../stores';
+  import {
+    connections,
+    remotePathByConnection,
+    currentPage,
+    activityTab,
+    activityConnectionId,
+    transferSummary,
+    addToast,
+  } from '../stores';
   import {
     getConnections,
     listRemoteDirectory,
@@ -12,7 +20,6 @@
     selectFiles,
     getSettings,
     deleteRemoteEntries,
-    deleteRemoteEntry,
   } from '../wailsjs';
   import type { ConnectionDTO, RemoteFileDTO } from '../types';
   import { pointerSelection, keyboardSelection } from '../selection';
@@ -97,7 +104,8 @@
     try {
       // Coalesce rapid back/forward clicks before they become FTP requests.
       // A refresh bypasses this delay and starts a fresh listing immediately.
-      if (!force) await new Promise<void>((resolve) => setTimeout(resolve, 120));
+      if (!force)
+        await new Promise<void>((resolve) => setTimeout(resolve, 120));
       if (generation !== loadGeneration) return;
       let request = force ? undefined : pendingDirectoryLoads.get(key);
       if (!request) {
@@ -111,7 +119,8 @@
         request = pending;
       }
       const result = await request;
-      if (generation === loadGeneration) entries = Array.isArray(result) ? result : [];
+      if (generation === loadGeneration)
+        entries = Array.isArray(result) ? result : [];
     } catch (e: any) {
       if (generation === loadGeneration) {
         error = e?.message || 'Unable to list this directory';
@@ -237,27 +246,6 @@
     }
     if (count > 0) addToast('info', `${count} file(s) queued for download`);
   }
-  async function deleteEntry(e: RemoteFileDTO) {
-    if (!connection || deleting) return;
-    const name = e.path.split('/').pop() || e.path;
-    const msg = e.isDir
-      ? `Are you sure you want to permanently delete folder "${name}" and all of its contents?`
-      : `Are you sure you want to permanently delete file "${name}"?`;
-    if (!confirm(msg)) return;
-
-    deleting = true;
-    try {
-      await deleteRemoteEntry(connection.id, e.path, e.isDir);
-      addToast('success', `Deleted ${name}`);
-      selected = selected.filter((p) => p !== e.path);
-      refresh();
-    } catch (err: any) {
-      addToast('error', `Failed to delete ${name}: ${err?.message || err}`);
-      refresh();
-    } finally {
-      deleting = false;
-    }
-  }
   async function deleteSelected() {
     if (!connection || !selected.length || deleting) return;
     const itemsToDelete: { path: string; isDir: boolean }[] = [];
@@ -339,15 +327,6 @@
       addToast('error', `Could not queue folder upload: ${e.message}`);
     }
   }
-  async function downloadFolder(e: RemoteFileDTO) {
-    if (!connection) return;
-    try {
-      const jobs = await queueDownloadDirectory(connection.id, e.path);
-      addToast('info', `${jobs.length} file(s) queued for download`);
-    } catch (err: any) {
-      addToast('error', `Could not queue folder download: ${err.message}`);
-    }
-  }
   function refresh() {
     lastLoad = '';
     loadDirectory(connectionId, currentPath, true);
@@ -370,144 +349,157 @@
 
 <div class="view-full-height">
   <section class="page-heading files-heading">
-  <div>
-    <p class="eyebrow">REMOTE FILES</p>
-    <h1>File Explorer</h1>
-    <p class="page-subtitle">
-      Browse and transfer files without changing deployment settings.
-    </p>
-  </div>
-  <div class="files-selected">{selected.length} selected</div>
-</section>
-<section class="files-panel">
-  <div class="files-toolbar">
-    <select
-      class="form-select"
-      aria-label="Connection"
-      bind:value={connectionId}
-      on:change={changeConnection}
-      ><option value="">Select connection</option
-      >{#each $connections as c}<option value={String(c.id)}>{c.name}</option
-        >{/each}</select
-    ><button
-      class="btn btn-secondary btn-sm"
-      on:click={goBack}
-      aria-label="Go back" title="Go back"
-      disabled={!back.length}><Icon name="back" /></button
-    ><button
-      class="btn btn-secondary btn-sm"
-      on:click={goForward}
-      aria-label="Go forward" title="Go forward"
-      disabled={!forward.length}><Icon name="forward" /></button
-    ><button
-      class="btn btn-secondary btn-sm"
-      on:click={up}
-      aria-label="Go to parent directory" title="Go to parent directory"
-      disabled={!connection || currentPath === (connection.remoteRoot || '/')}
-      ><Icon name="up" /></button
-    ><input
-      class="form-input path-input"
-      aria-label="Remote path"
-      bind:value={pathInput}
-      on:change={() => setPath(pathInput)}
-      on:keydown={(e) => {
-        if (e.key === 'Enter') setPath(pathInput);
+    <div>
+      <p class="eyebrow">REMOTE FILES</p>
+      <h1>File Explorer</h1>
+      <p class="page-subtitle">
+        Browse and transfer files without changing deployment settings.
+      </p>
+    </div>
+    <button
+      class="btn btn-secondary"
+      on:click={() => {
+        $activityConnectionId = connection?.id ?? null;
+        $activityTab = 'Transfers';
+        $currentPage = 'activity';
       }}
-    /><button
-      class="btn btn-secondary btn-sm"
-      on:click={refresh} aria-label="Refresh directory" title="Refresh directory"
-      disabled={!connection}><Icon name="refresh" /></button
-    ><input
-      class="form-input files-search"
-      placeholder="Filter current directory"
-      bind:value={query}
-    /><button
-      class="btn btn-secondary btn-sm"
-      on:click={upload}
-      disabled={!connection}><Icon name="upload" size={14} /> Upload files</button
-    ><button
-      class="btn btn-secondary btn-sm"
-      on:click={uploadFolder}
-      disabled={!connection}><Icon name="upload" size={14} /> Upload folder</button
-    ><button
-      class="btn btn-primary btn-sm"
-      on:click={() => download()}
-      disabled={!selected.length || deleting}><Icon name="download" size={14} /> Download selected</button
-    ><button
-      class="btn btn-danger btn-sm"
-      on:click={deleteSelected}
-      disabled={!selected.length || deleting}><Icon name="trash" size={14} /> Delete selected</button
+      ><Icon name="transfer" size={15} /> View transfers{#if $transferSummary.active}<span
+          class="tab-count">{$transferSummary.active}</span
+        >{/if}</button
     >
-  </div>
-  {#if loading}<div class="files-state">
-      <Icon name="loader" size={20} spin /> Loading directory…
-    </div>{:else if error}<div class="files-state files-error">
-      <Icon name="error" size={20} />
-      <strong>Could not access directory</strong><span>{error}</span><button
+  </section>
+  <section class="files-panel">
+    <div class="files-toolbar">
+      <select
+        class="form-select"
+        aria-label="Connection"
+        bind:value={connectionId}
+        on:change={changeConnection}
+        ><option value="">Select connection</option
+        >{#each $connections as c}<option value={String(c.id)}>{c.name}</option
+          >{/each}</select
+      ><button
         class="btn btn-secondary btn-sm"
-        on:click={refresh} aria-label="Refresh directory" title="Refresh directory"><Icon name="refresh" size={14} /> Retry</button
+        on:click={goBack}
+        aria-label="Go back"
+        title="Go back"
+        disabled={!back.length}><Icon name="back" /></button
+      ><button
+        class="btn btn-secondary btn-sm"
+        on:click={goForward}
+        aria-label="Go forward"
+        title="Go forward"
+        disabled={!forward.length}><Icon name="forward" /></button
+      ><button
+        class="btn btn-secondary btn-sm"
+        on:click={up}
+        aria-label="Go to parent directory"
+        title="Go to parent directory"
+        disabled={!connection || currentPath === (connection.remoteRoot || '/')}
+        ><Icon name="up" /></button
+      ><input
+        class="form-input path-input"
+        aria-label="Remote path"
+        bind:value={pathInput}
+        on:change={() => setPath(pathInput)}
+        on:keydown={(e) => {
+          if (e.key === 'Enter') setPath(pathInput);
+        }}
+      /><button
+        class="btn btn-secondary btn-sm"
+        on:click={refresh}
+        aria-label="Refresh directory"
+        title="Refresh directory"
+        disabled={!connection}><Icon name="refresh" /></button
       >
-    </div>{:else if !connection}<div class="files-state">
-      <Icon name="server" size={24} />
-      Choose a saved connection to browse remote files.
-    </div>{:else if !filtered.length}<div class="files-state">
-      <Icon name="folder" size={24} />
-      {query ? 'No files match this filter.' : 'This directory is empty.'}
-    </div>{:else}
-    <!-- svelte-ignore a11y-no-noninteractive-element-interactions a11y-no-noninteractive-tabindex -->
-    <div
-      class="files-table-wrap"
-      role="region"
-      aria-label="Remote files table"
-      bind:this={rows}
-      tabindex="0"
-      on:keydown={keydown}
-      on:click={clearIfEmpty}
-    >
-      <table class="files-table">
-        <thead
-          ><tr
-            ><th>Name</th><th>Type</th><th>Size</th><th>Modified</th><th
-            ></th></tr
-          ></thead
-        ><tbody
-          >{#each filtered as f, i (f.path)}<tr
-              class:selected={selected.includes(f.path)}
-              class:focused={focusIndex === i}
-              on:click={(e) => choose(f, e)}
-              on:dblclick={() => open(f)}
-              ><td
-                ><span class="file-icon {f.isDir ? 'bg-yellow' : ''}"><Icon name={getFileIcon(f.path, f.isDir)} size={16} /></span>{f.path
-                  .split('/')
-                  .pop()}</td
-              ><td>{f.isDir ? 'Directory' : 'File'}</td><td
-                >{f.isDir || !f.sizeKnown ? '—' : formatSize(f.size)}</td
-              ><td
-                >{f.modified ? new Date(f.modified).toLocaleString() : '—'}</td
-              ><td style="text-align: right; white-space: nowrap;"
-                >{#if f.isDir}<button
-                    class="text-button"
-                    title="Download folder"
-                    aria-label={`Download folder ${f.path}`}
-                    on:click|stopPropagation={() => downloadFolder(f)}
-                    ><Icon name="download" size={13} /></button
-                  >{:else}<button
-                    class="text-button"
-                    title="Download file"
-                    aria-label={`Download file ${f.path}`}
-                    on:click|stopPropagation={() => download([f.path])}
-                    ><Icon name="download" size={13} /></button
-                  >{/if}<button
-                    class="text-button text-button-danger"
-                    title={f.isDir ? 'Delete folder recursively' : 'Delete file'}
-                    aria-label={f.isDir ? `Delete folder ${f.path}` : `Delete file ${f.path}`}
-                    on:click|stopPropagation={() => deleteEntry(f)}
-                    ><Icon name="trash" size={13} /></button
-                ></td
-              ></tr
-            >{/each}</tbody
+    </div>
+    <div class="files-actions">
+      <span class="files-selected"
+        >{selected.length
+          ? `${selected.length} selected`
+          : `${filtered.length} items`}</span
+      >
+      <input
+        class="form-input files-search"
+        placeholder="Filter current directory"
+        bind:value={query}
+      /><button
+        class="btn btn-secondary btn-sm"
+        on:click={upload}
+        disabled={!connection}
+        ><Icon name="upload" size={14} /> Upload files</button
+      ><button
+        class="btn btn-secondary btn-sm"
+        on:click={uploadFolder}
+        disabled={!connection}
+        ><Icon name="upload" size={14} /> Upload folder</button
+      ><button
+        class="btn btn-primary btn-sm"
+        on:click={() => download()}
+        disabled={!selected.length || deleting}
+        ><Icon name="download" size={14} /> Download</button
+      ><button
+        class="btn btn-danger btn-sm"
+        on:click={deleteSelected}
+        disabled={!selected.length || deleting}
+        ><Icon name="trash" size={14} /> Delete</button
+      >
+    </div>
+    {#if loading}<div class="files-state">
+        <Icon name="loader" size={20} spin /> Loading directory…
+      </div>{:else if error}<div class="files-state files-error">
+        <Icon name="error" size={20} />
+        <strong>Could not access directory</strong><span>{error}</span><button
+          class="btn btn-secondary btn-sm"
+          on:click={refresh}
+          aria-label="Refresh directory"
+          title="Refresh directory"
+          ><Icon name="refresh" size={14} /> Retry</button
         >
-      </table>
-    </div>{/if}
+      </div>{:else if !connection}<div class="files-state">
+        <Icon name="server" size={24} />
+        Choose a saved connection to browse remote files.
+      </div>{:else if !filtered.length}<div class="files-state">
+        <Icon name="folder" size={24} />
+        {query ? 'No files match this filter.' : 'This directory is empty.'}
+      </div>{:else}
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions a11y-no-noninteractive-tabindex -->
+      <div
+        class="files-table-wrap"
+        role="region"
+        aria-label="Remote files table"
+        bind:this={rows}
+        tabindex="0"
+        on:keydown={keydown}
+        on:click={clearIfEmpty}
+      >
+        <table class="files-table">
+          <thead
+            ><tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th></tr
+            ></thead
+          ><tbody
+            >{#each filtered as f, i (f.path)}<tr
+                class:selected={selected.includes(f.path)}
+                class:focused={focusIndex === i}
+                on:click={(e) => choose(f, e)}
+                on:dblclick={() => open(f)}
+                ><td
+                  ><span class="file-icon {f.isDir ? 'bg-yellow' : ''}"
+                    ><Icon
+                      name={getFileIcon(f.path, f.isDir)}
+                      size={16}
+                    /></span
+                  >{f.path.split('/').pop()}</td
+                ><td>{f.isDir ? 'Directory' : 'File'}</td><td
+                  >{f.isDir || !f.sizeKnown ? '—' : formatSize(f.size)}</td
+                ><td
+                  >{f.modified
+                    ? new Date(f.modified).toLocaleString()
+                    : '—'}</td
+                ></tr
+              >{/each}</tbody
+          >
+        </table>
+      </div>{/if}
   </section>
 </div>

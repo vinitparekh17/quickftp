@@ -177,6 +177,80 @@ export namespace main {
 
 }
 
+export namespace storage {
+	
+	export class DeploymentLog {
+	    id: number;
+	    stream: string;
+	    line: string;
+	    // Go type: time
+	    createdAt: any;
+	
+	    static createFrom(source: any = {}) {
+	        return new DeploymentLog(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.stream = source["stream"];
+	        this.line = source["line"];
+	        this.createdAt = this.convertValues(source["createdAt"], null);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class DeploymentLogPage {
+	    entries: DeploymentLog[];
+	    total: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DeploymentLogPage(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.entries = this.convertValues(source["entries"], DeploymentLog);
+	        this.total = source["total"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace transfer {
 	
 	export class ConnectionSnapshot {
@@ -203,6 +277,9 @@ export namespace transfer {
 	}
 	export class Activity {
 	    id: string;
+	    deploymentId?: number;
+	    batchId?: string;
+	    batchName?: string;
 	    direction: string;
 	    connectionId: number;
 	    connectionName: string;
@@ -227,6 +304,9 @@ export namespace transfer {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
+	        this.deploymentId = source["deploymentId"];
+	        this.batchId = source["batchId"];
+	        this.batchName = source["batchName"];
 	        this.direction = source["direction"];
 	        this.connectionId = source["connectionId"];
 	        this.connectionName = source["connectionName"];

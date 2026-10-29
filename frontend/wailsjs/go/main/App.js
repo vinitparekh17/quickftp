@@ -10,6 +10,14 @@ export function CancelTransfer(arg1) {
   return window['go']['main']['App']['CancelTransfer'](arg1);
 }
 
+export function ClearDeploymentLogs(arg1) {
+  return window['go']['main']['App']['ClearDeploymentLogs'](arg1);
+}
+
+export function ClearTransferHistory(arg1) {
+  return window['go']['main']['App']['ClearTransferHistory'](arg1);
+}
+
 export function DeleteConnection(arg1) {
   return window['go']['main']['App']['DeleteConnection'](arg1);
 }
@@ -42,8 +50,16 @@ export function GetDeploymentHistory(arg1) {
   return window['go']['main']['App']['GetDeploymentHistory'](arg1);
 }
 
+export function GetDeploymentLogs(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GetDeploymentLogs'](arg1, arg2, arg3);
+}
+
 export function GetPendingDeployments() {
   return window['go']['main']['App']['GetPendingDeployments']();
+}
+
+export function GetProjectDeployments(arg1, arg2) {
+  return window['go']['main']['App']['GetProjectDeployments'](arg1, arg2);
 }
 
 export function GetProjects() {

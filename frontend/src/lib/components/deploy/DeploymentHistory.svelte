@@ -21,6 +21,7 @@
   export let projects: ProjectDTO[] = [];
   export let connections: ConnectionDTO[] = [];
   export let loading = false;
+  export let projectName = '';
   export let activeRollbackId: number | null = null;
   export let failedRollbackIds: Set<number> = new Set();
 
@@ -48,7 +49,8 @@
   $: activeCount = deployments.filter(
     (d) =>
       d.status === 'running' &&
-      ($deployStatus === 'running' || $pendingDeployments.some((p) => p.id === d.id))
+      ($deployStatus === 'running' ||
+        $pendingDeployments.some((p) => p.id === d.id))
   ).length;
 
   // Filtered deployment rows
@@ -76,12 +78,35 @@
     );
 
     if (selectedStatusFilter !== 'all') {
-      if (selectedStatusFilter === 'success' && statusMeta.key !== 'completed') return false;
-      if (selectedStatusFilter === 'failed' && statusMeta.key !== 'failed' && statusMeta.key !== 'rollback_failed') return false;
-      if (selectedStatusFilter === 'cancelled' && statusMeta.key !== 'cancelled') return false;
-      if (selectedStatusFilter === 'rolled_back' && statusMeta.key !== 'rolled_back') return false;
-      if (selectedStatusFilter === 'running' && statusMeta.key !== 'running' && statusMeta.key !== 'rolling_back') return false;
-      if (selectedStatusFilter === 'interrupted' && statusMeta.key !== 'interrupted') return false;
+      if (selectedStatusFilter === 'success' && statusMeta.key !== 'completed')
+        return false;
+      if (
+        selectedStatusFilter === 'failed' &&
+        statusMeta.key !== 'failed' &&
+        statusMeta.key !== 'rollback_failed'
+      )
+        return false;
+      if (
+        selectedStatusFilter === 'cancelled' &&
+        statusMeta.key !== 'cancelled'
+      )
+        return false;
+      if (
+        selectedStatusFilter === 'rolled_back' &&
+        statusMeta.key !== 'rolled_back'
+      )
+        return false;
+      if (
+        selectedStatusFilter === 'running' &&
+        statusMeta.key !== 'running' &&
+        statusMeta.key !== 'rolling_back'
+      )
+        return false;
+      if (
+        selectedStatusFilter === 'interrupted' &&
+        statusMeta.key !== 'interrupted'
+      )
+        return false;
     }
 
     // Project matching
@@ -90,14 +115,18 @@
     }
 
     // Connection matching
-    if (selectedConnectionFilter !== 'all' && connName !== selectedConnectionFilter) {
+    if (
+      selectedConnectionFilter !== 'all' &&
+      connName !== selectedConnectionFilter
+    ) {
       return false;
     }
 
     // Search query matching
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
-      const haystack = `${d.id} ${projName} ${connName} ${connHost} ${statusMeta.label} ${d.currentPhase} ${d.errorMessage}`.toLowerCase();
+      const haystack =
+        `${d.id} ${projName} ${connName} ${connHost} ${statusMeta.label} ${d.currentPhase} ${d.errorMessage}`.toLowerCase();
       if (!haystack.includes(q)) return false;
     }
 
@@ -138,7 +167,9 @@
     const proj =
       d.projectName || projects.find((p) => p.id === d.projectId)?.name || '';
     const conn =
-      d.connectionName || connections.find((c) => c.id === d.connectionId)?.name || '';
+      d.connectionName ||
+      connections.find((c) => c.id === d.connectionId)?.name ||
+      '';
     dispatch('newDeployment', { projectName: proj, connectionName: conn });
   }
 
@@ -155,9 +186,12 @@
   <section class="page-heading history-page-heading">
     <div>
       <div class="heading-breadcrumbs">Deployments</div>
-      <h1>Deployment History</h1>
+      <h1>
+        {projectName ? `${projectName} deployments` : 'Deployment History'}
+      </h1>
       <p class="page-subtitle">
-        Independent execution history, verification records, and verified rollback recovery.
+        Independent execution history, verification records, and verified
+        rollback recovery.
       </p>
     </div>
 
@@ -168,18 +202,27 @@
           <span class="metric-num">{totalCount}</span>
           <span class="metric-lbl">Total</span>
         </div>
-        <div class="metric-pill text-success" title="Successfully verified deployments">
+        <div
+          class="metric-pill text-success"
+          title="Successfully verified deployments"
+        >
           <span class="metric-num">{successCount}</span>
           <span class="metric-lbl">Success</span>
         </div>
         {#if failedCount > 0}
-          <div class="metric-pill text-danger" title="Failed or interrupted deployments">
+          <div
+            class="metric-pill text-danger"
+            title="Failed or interrupted deployments"
+          >
             <span class="metric-num">{failedCount}</span>
             <span class="metric-lbl">Failed</span>
           </div>
         {/if}
         {#if activeCount > 0}
-          <div class="metric-pill text-info" title="Currently running deployments">
+          <div
+            class="metric-pill text-info"
+            title="Currently running deployments"
+          >
             <span class="metric-num">{activeCount}</span>
             <span class="metric-lbl">Active</span>
           </div>
@@ -189,7 +232,9 @@
       <button
         class="btn btn-primary"
         on:click={() => dispatch('newDeployment')}
-        disabled={$deployStatus === 'running' || !projects.length || !connections.length}
+        disabled={$deployStatus === 'running' ||
+          !projects.length ||
+          !connections.length}
       >
         <Icon name="play" size={14} />
         <span>New Deployment</span>
@@ -206,7 +251,7 @@
             <Icon name="search" size={14} />
             <input
               class="form-input search-input"
-              placeholder="Search by ID, project, target host, or error..."
+              placeholder="Search by run, target host, or error…"
               bind:value={searchQuery}
               aria-label="Search deployment history"
             />
@@ -221,18 +266,19 @@
             {/if}
           </div>
 
-          <!-- Project Filter -->
-          <select
-            class="form-select filter-select"
-            bind:value={selectedProjectFilter}
-            aria-label="Filter by project"
-          >
-            <option value="all">All Projects</option>
-            {#each projects as p}
-              <option value={p.name}>{p.name}</option>
-            {/each}
-          </select>
-
+          {#if !projectName}
+            <!-- Project Filter -->
+            <select
+              class="form-select filter-select"
+              bind:value={selectedProjectFilter}
+              aria-label="Filter by project"
+            >
+              <option value="all">All Projects</option>
+              {#each projects as p}
+                <option value={p.name}>{p.name}</option>
+              {/each}
+            </select>
+          {/if}
           <!-- Connection Filter -->
           <select
             class="form-select filter-select"
@@ -284,7 +330,8 @@
             <Icon name="deploy" size={36} />
             <h3>No Deployments Yet</h3>
             <p>
-              Publish your Angular or .NET build artifacts to FTP/FTPS with automated backups, SHA-256 verification, and 1-click rollback.
+              Publish your Angular or .NET build artifacts to FTP/FTPS with
+              automated backups, SHA-256 verification, and 1-click rollback.
             </p>
             <button
               class="btn btn-primary mt-2"
@@ -298,8 +345,13 @@
         {:else if filteredDeployments.length === 0}
           <!-- Filtered out state -->
           <div class="empty-filter-state">
-            <p class="text-muted">No deployment runs match your filter criteria.</p>
-            <button class="btn btn-secondary btn-sm mt-2" on:click={resetFilters}>
+            <p class="text-muted">
+              No deployment runs match your filter criteria.
+            </p>
+            <button
+              class="btn btn-secondary btn-sm mt-2"
+              on:click={resetFilters}
+            >
               Reset Filters
             </button>
           </div>
@@ -310,7 +362,7 @@
                 <tr>
                   <th style="width: 85px;">ID</th>
                   <th style="width: 140px;">Status</th>
-                  <th>Project</th>
+                  {#if !projectName}<th>Project</th>{/if}
                   <th>Target Host</th>
                   <th>Started</th>
                   <th>Duration</th>
@@ -361,22 +413,25 @@
                       </span>
                     </td>
 
-                    <!-- Project -->
-                    <td>
-                      <div class="project-cell">
-                        <span class="project-type-icon">
-                          <Icon name={getProjectIcon(projType)} size={14} />
-                        </span>
-                        <strong>{projName}</strong>
-                      </div>
-                    </td>
-
+                    {#if !projectName}
+                      <!-- Project -->
+                      <td>
+                        <div class="project-cell">
+                          <span class="project-type-icon">
+                            <Icon name={getProjectIcon(projType)} size={14} />
+                          </span>
+                          <strong>{projName}</strong>
+                        </div>
+                      </td>
+                    {/if}
                     <!-- Target Connection -->
                     <td>
                       <div class="connection-cell">
                         <span>{connName}</span>
                         {#if connHost}
-                          <span class="text-xs text-muted text-mono">({connHost})</span>
+                          <span class="text-xs text-muted text-mono"
+                            >({connHost})</span
+                          >
                         {/if}
                       </div>
                     </td>
@@ -631,4 +686,3 @@
     gap: 12px;
   }
 </style>
-

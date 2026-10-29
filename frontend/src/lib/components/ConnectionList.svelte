@@ -2,7 +2,13 @@
   import Icon from './Icon.svelte';
   import { onMount } from 'svelte';
   import type { ConnectionDTO } from '../types';
-  import { connections, addToast } from '../stores';
+  import {
+    connections,
+    addToast,
+    currentPage,
+    activityConnectionId,
+    activityTab,
+  } from '../stores';
   import { getConnections, deleteConnection, testConnection } from '../wailsjs';
   import ConnectionForm from './ConnectionForm.svelte';
 
@@ -81,117 +87,111 @@
   }
 </script>
 
-<div class="card page-card">
-  <div class="card-header">
+<div class="view-full-height">
+  <section class="page-heading">
     <div>
-      <h2>FTP Connections</h2>
-      <p class="text-sm text-muted">
-        Manage remote FTP and explicit FTPS server credentials
+      <h1>Connections</h1>
+      <p class="page-subtitle">
+        Saved servers, credentials, and connection tests.
       </p>
     </div>
-    <button class="btn btn-primary" on:click={handleAdd}>
-      <Icon name="plus" size={16} />
-      <span>Add Connection</span>
-    </button>
-  </div>
-
-  <div class="card-body" style="padding: 0;">
-    {#if loading}
-      <div style="padding: 32px; text-align: center;" class="text-muted">
-        Loading connections...
+    <button class="btn btn-primary" on:click={handleAdd}
+      ><Icon name="plus" size={15} /> Add connection</button
+    >
+  </section>
+  <div class="card page-card resource-list-card">
+    {#if loading}<div class="files-state">
+        <Icon name="loader" size={20} spin /> Loading connections…
       </div>
-    {:else if $connections.length === 0}
-      <div class="empty-state">
-        <Icon name="server" size={24} />
+    {:else if !$connections.length}<div class="empty-state">
+        <Icon name="server" size={28} />
         <h3>No connections yet</h3>
-        <p>Create an FTP or FTPS connection to deploy your build artifacts.</p>
+        <p>Add the FTP or FTPS server you want to publish to.</p>
         <button class="btn btn-primary" on:click={handleAdd}
-          >Add First Connection</button
+          >Add connection</button
         >
       </div>
-    {:else}
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Protocol</th>
-              <th>Host & Port</th>
-              <th>Username</th>
-              <th>Remote Root</th>
-              <th>Status</th>
-              <th style="text-align: right;">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
+    {:else}<div class="table-wrap">
+        <table class="resource-table">
+          <thead
+            ><tr
+              ><th>Connection</th><th>Server &amp; remote folder</th><th
+                >Last test</th
+              ><th class="row-actions-heading">Actions</th></tr
+            ></thead
+          ><tbody>
             {#each $connections as c (c.id)}
-              <tr>
-                <td>
-                  <strong>{c.name}</strong>
-                </td>
-                <td>
-                  {#if c.protocol === 'ftps_explicit'}
-                    <span class="badge badge-info">FTPS</span>
-                  {:else}
-                    <span class="badge badge-gray">FTP</span>
-                  {/if}
-                </td>
-                <td class="text-mono">{c.host}:{c.port}</td>
-                <td>{c.username}</td>
-                <td class="text-mono text-muted">{c.remoteRoot}</td>
+              <tr
+                ><td
+                  ><div class="resource-name">
+                    <strong>{c.name}</strong><span
+                      class="badge"
+                      class:badge-info={c.protocol === 'ftps_explicit'}
+                      >{c.protocol === 'ftps_explicit' ? 'FTPS' : 'FTP'}</span
+                    >
+                  </div>
+                  <span class="cell-secondary">{c.username}</span></td
+                ><td
+                  ><span class="text-mono resource-path">{c.host}:{c.port}</span
+                  ><span class="cell-secondary text-mono resource-path"
+                    >{c.remoteRoot}</span
+                  ></td
+                >
                 <td
                   >{#if connectionState[c.id] === 'checking'}<span
-                      class="activity-status running"><i></i>Testing</span
+                      class="activity-status"
+                      ><Icon name="loader" size={13} spin /> Testing…</span
                     >{:else if connectionState[c.id] === 'connected'}<span
-                      class="activity-status success"><i></i>Connected</span
+                      class="activity-status success"
+                      ><Icon name="success" size={13} /> Passed</span
                     >{:else if connectionState[c.id] === 'failed'}<span
-                      class="activity-status failed"><i></i>Failed</span
-                    >{:else}<span class="activity-status"
-                      ><i></i>Not tested</span
-                    >{/if}</td
+                      class="activity-status failed"
+                      ><Icon name="error" size={13} /> Failed</span
+                    >{:else}<span class="text-muted">Not tested</span>{/if}</td
                 >
-                <td style="text-align: right; white-space: nowrap;">
-                  <div class="table-actions">
+                <td
+                  ><div class="table-actions">
                     <button
-                      class="table-icon-action action-primary"
-                      on:click={() => handleTest(c)}
-                      disabled={testingId === c.id}
-                      title={testingId === c.id ? `Testing connection "${c.name}"...` : `Test connection "${c.name}"`}
-                      aria-label={`Test connection "${c.name}"`}
+                      class="btn btn-secondary btn-sm"
+                      on:click={() => {
+                        $activityConnectionId = c.id;
+                        $activityTab = 'Transfers';
+                        $currentPage = 'activity';
+                      }}>Transfers</button
                     >
-                      <Icon name="refresh" size={16} spin={testingId === c.id} />
-                    </button>
                     <button
+                      class="btn btn-secondary btn-sm"
+                      on:click={() => handleTest(c)}
+                      disabled={testingId !== null}
+                      ><Icon
+                        name="refresh"
+                        size={13}
+                        spin={testingId === c.id}
+                      /> Test</button
+                    ><button
                       class="table-icon-action action-secondary"
                       on:click={() => handleEdit(c)}
-                      title={`Edit connection "${c.name}"`}
-                      aria-label={`Edit connection "${c.name}"`}
-                    >
-                      <Icon name="edit" size={16} />
-                    </button>
-                    <button
+                      title={`Edit ${c.name}`}
+                      aria-label={`Edit ${c.name}`}
+                      ><Icon name="edit" size={16} /></button
+                    ><button
                       class="table-icon-action action-danger"
                       on:click={() => handleDelete(c)}
-                      title={`Delete connection "${c.name}"`}
-                      aria-label={`Delete connection "${c.name}"`}
+                      title={`Delete ${c.name}`}
+                      aria-label={`Delete ${c.name}`}
+                      ><Icon name="trash" size={16} /></button
                     >
-                      <Icon name="trash" size={16} />
-                    </button>
-                  </div>
-                </td>
-              </tr>
+                  </div></td
+                ></tr
+              >
             {/each}
           </tbody>
         </table>
-      </div>
-    {/if}
+      </div>{/if}
   </div>
 </div>
-
-{#if showForm}
-  <ConnectionForm
+{#if showForm}<ConnectionForm
     connection={editingConnection}
     on:saved={handleSaved}
     on:cancel={handleCancel}
-  />
-{/if}
+  />{/if}

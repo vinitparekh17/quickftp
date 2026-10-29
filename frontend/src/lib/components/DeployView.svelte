@@ -1,19 +1,23 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { DeploymentDTO } from '../types';
+  import { selectDeployment } from '../deploymentSelection';
   import {
     deploymentHistory,
     connections,
     projects,
     deployStatus,
-    activeDeploymentId,
+    activeDeployment,
     selectedProjectName,
     selectedConnectionName,
     currentPage,
+    requestedDeploymentId,
+    deploymentProjectId,
     addToast,
   } from '../stores';
   import {
     getDeploymentHistory,
+    getProjectDeployments,
+    getDeployment,
     getConnections,
     getProjects,
   } from '../wailsjs';
@@ -24,7 +28,7 @@
   // Navigation state within Deployments:
   // selectedRunId === null -> History View (default scannable table)
   // selectedRunId !== null -> Detail View for that specific execution run
-  let selectedRunId: number | null = null;
+  let selectedRunId: number | null = $deployStatus === 'running' ? 0 : null;
 
   // New Deployment Modal state
   let showNewModal = false;
@@ -35,34 +39,52 @@
   let activeRollbackId: number | null = null;
   let failedRollbackIds: Set<number> = new Set();
 
-  $: selectedDeployment =
-    $deploymentHistory.find((d) => d.id === selectedRunId) ||
-    ($activeDeploymentId && selectedRunId === $activeDeploymentId
-      ? {
-          id: $activeDeploymentId,
-          projectId:
-            $projects.find((p) => p.name === $selectedProjectName)?.id ?? 0,
-          projectName: $selectedProjectName,
-          connectionId:
-            $connections.find((c) => c.name === $selectedConnectionName)?.id ?? 0,
-          connectionName: $selectedConnectionName,
-          status: 'running',
-          currentPhase: 'build',
-          backupDir: '',
-          errorMessage: '',
-          startedAt: new Date().toISOString(),
-          finishedAt: '',
-        }
-      : null);
+  $: selectedDeployment = selectDeployment(
+    selectedRunId,
+    $deploymentHistory,
+    $activeDeployment
+  );
 
-  // If a deployment is currently running and user hasn't chosen a historical run,
-  // show the active deployment details automatically.
+  $: scopedProjectId = selectedDeployment?.projectId || $deploymentProjectId;
+  $: scopedProject = $projects.find(
+    (project) => project.id === scopedProjectId
+  );
+  $: projectRuns = $deploymentHistory.filter(
+    (run) => run.projectId === scopedProjectId
+  );
+  $: if (selectedDeployment?.projectId)
+    $deploymentProjectId = selectedDeployment.projectId;
+  $: if (scopedProject && !showNewModal) modalProject = scopedProject.name;
+  let fetchedProjectId: number | null = null;
   $: if (
-    $deployStatus === 'running' &&
-    $activeDeploymentId &&
-    selectedRunId === null
+    $currentPage !== 'deploy' &&
+    !showNewModal &&
+    scopedProjectId &&
+    scopedProjectId !== fetchedProjectId
   ) {
-    selectedRunId = $activeDeploymentId;
+    fetchedProjectId = scopedProjectId;
+    void loadProjectHistory(scopedProjectId);
+  }
+  async function loadProjectHistory(id: number) {
+    try {
+      const scoped = await getProjectDeployments(id);
+      const all = new Map($deploymentHistory.map((run) => [run.id, run]));
+      for (const run of scoped) all.set(run.id, run);
+      $deploymentHistory = [...all.values()].sort((a, b) => b.id - a.id);
+    } catch (error: any) {
+      addToast('error', `Could not load project deployments: ${error.message}`);
+    }
+  }
+  let observedStatus = $deployStatus;
+  $: if ($deployStatus !== observedStatus) {
+    observedStatus = $deployStatus;
+    if ($deployStatus !== 'running' && $deployStatus !== 'idle')
+      void loadHistory();
+  }
+
+  $: if ($requestedDeploymentId !== null) {
+    selectedRunId = $requestedDeploymentId;
+    $requestedDeploymentId = null;
   }
 
   // Pre-fill modal if requested from Dashboard / ProjectList
@@ -74,8 +96,13 @@
   }
 
   // If user navigated directly via "Deploy" button elsewhere ($currentPage === 'deploy')
-  $: if ($currentPage === 'deploy' && !showNewModal && selectedRunId === null) {
+  $: if ($currentPage === 'deploy') {
+    const requestedProject = $projects.find(
+      (project) => project.name === $selectedProjectName
+    );
+    if (requestedProject) $deploymentProjectId = requestedProject.id;
     showNewModal = true;
+    $currentPage = 'history';
   }
 
   onMount(async () => {
@@ -95,13 +122,20 @@
       console.warn('Could not load projects/connections:', err);
     }
 
-    await loadHistory();
+    if (!showNewModal) await loadHistory();
   });
 
   async function loadHistory() {
     loading = true;
     try {
-      $deploymentHistory = await getDeploymentHistory(50);
+      const recent = await getDeploymentHistory(50);
+      const all = new Map($deploymentHistory.map((run) => [run.id, run]));
+      for (const run of recent) all.set(run.id, run);
+      if (selectedRunId && selectedRunId > 0 && !all.has(selectedRunId)) {
+        const requested = await getDeployment(selectedRunId);
+        if (requested) all.set(requested.id, requested);
+      }
+      $deploymentHistory = [...all.values()].sort((a, b) => b.id - a.id);
     } catch (err: any) {
       addToast('error', `Could not load deployment history: ${err.message}`);
     } finally {
@@ -127,42 +161,65 @@
     showNewModal = true;
   }
 
-  async function handleDeploymentStarted(
+  function handleDeploymentStarted(
     e: CustomEvent<{ projectName: string; connectionName: string }>
   ) {
+    $deploymentProjectId =
+      $projects.find((project) => project.name === e.detail.projectName)?.id ??
+      null;
     $selectedProjectName = e.detail.projectName;
     $selectedConnectionName = e.detail.connectionName;
-
-    // Refresh history so the new run record is fetched
-    await loadHistory();
-
-    // Select the new run or active run
-    if ($activeDeploymentId) {
-      selectedRunId = $activeDeploymentId;
-    } else if ($deploymentHistory.length > 0) {
-      selectedRunId = $deploymentHistory[0].id;
-    }
+    selectedRunId = 0;
+    void loadHistory();
   }
 </script>
 
 <div class="deployments-view-container">
+  <nav class="hierarchy-breadcrumb" aria-label="Project navigation">
+    <button class="text-button" on:click={() => ($currentPage = 'projects')}
+      >Projects</button
+    ><span>/</span>{#if scopedProject}<button
+        class="text-button"
+        on:click={() => {
+          $deploymentProjectId = scopedProject.id;
+          selectedRunId = null;
+        }}>{scopedProject.name}</button
+      ><span>/</span><span>Deployments</span>{:else}<span>Select a project</span
+      >{/if}
+  </nav>
   {#if selectedDeployment !== null}
     <!-- Dedicated Deployment Details View -->
-    <DeploymentDetail
-      deployment={selectedDeployment}
-      allDeployments={$deploymentHistory}
-      projects={$projects}
-      connections={$connections}
-      bind:activeRollbackId
-      bind:failedRollbackIds
-      on:back={handleBackToHistory}
-      on:newDeployment={handleOpenNewModal}
-      on:refresh={loadHistory}
-    />
+    {#key `${selectedRunId}:${selectedDeployment.id}`}
+      <DeploymentDetail
+        deployment={selectedDeployment}
+        allDeployments={$deploymentHistory}
+        projects={$projects}
+        connections={$connections}
+        bind:activeRollbackId
+        bind:failedRollbackIds
+        on:back={handleBackToHistory}
+        on:newDeployment={handleOpenNewModal}
+        on:refresh={loadHistory}
+      />
+    {/key}
+  {:else if !scopedProjectId}
+    <div class="card activity-groups">
+      {#each $projects as project}<button
+          class="activity-group-card"
+          on:click={() => {
+            $deploymentProjectId = project.id;
+            $selectedProjectName = project.name;
+          }}
+          ><strong>{project.name}</strong><span class="cell-secondary"
+            >View deployments and logs for this project</span
+          ></button
+        >{/each}
+    </div>
   {:else}
     <!-- Default Scannable Deployment History View -->
     <DeploymentHistory
-      deployments={$deploymentHistory}
+      deployments={projectRuns}
+      projectName={scopedProject?.name || ''}
       projects={$projects}
       connections={$connections}
       {loading}

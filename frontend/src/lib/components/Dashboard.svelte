@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
   import { getProjectIcon, getStatusIcon } from '../icons';
+  import { formatDuration, formatDateTime } from '../deploymentUtils';
   import { onMount } from 'svelte';
   import {
     currentPage,
@@ -10,6 +11,9 @@
     selectedProjectName,
     selectedConnectionName,
     newProjectRequested,
+    requestedDeploymentId,
+    deployStatus,
+    activeDeployment,
     addToast,
   } from '../stores';
   import {
@@ -18,274 +22,220 @@
     getDeploymentHistory,
   } from '../wailsjs';
 
-  let environment = 'Production';
-  let activeProjectId = '';
-  let activeConnectionId = '';
+  let projectName = $selectedProjectName;
+  let connectionName = $selectedConnectionName;
   let loading = true;
-  $: activeProject =
-    $projects.find((p) => String(p.id) === activeProjectId) ?? $projects[0];
-  $: activeConnection =
-    $connections.find((c) => String(c.id) === activeConnectionId) ??
-    $connections[0];
-
+  $: project = $projects.find((item) => item.name === projectName);
+  $: connection = $connections.find((item) => item.name === connectionName);
   onMount(async () => {
     try {
-      const [p, c, h] = await Promise.all([
+      const [p, c, history] = await Promise.all([
         getProjects(),
         getConnections(),
         getDeploymentHistory(6),
       ]);
       $projects = p;
       $connections = c;
-      $deploymentHistory = h;
-      activeProjectId = p[0] ? String(p[0].id) : '';
-      activeConnectionId = c[0] ? String(c[0].id) : '';
-    } catch (err: any) {
-      addToast('error', `Could not load dashboard: ${err.message}`);
+      $deploymentHistory = history.slice().sort((a, b) => b.id - a.id);
+      if (!p.some((item) => item.name === projectName))
+        projectName = p[0]?.name || '';
+      if (!c.some((item) => item.name === connectionName))
+        connectionName = c[0]?.name || '';
+    } catch (error: any) {
+      addToast('error', `Could not load dashboard: ${error.message}`);
     } finally {
       loading = false;
     }
   });
-
-  function go(page: 'projects' | 'connections' | 'deploy' | 'history') {
-    $currentPage = page;
+  function startDeploy() {
+    $selectedProjectName = projectName;
+    $selectedConnectionName = connectionName;
+    $currentPage = 'deploy';
+  }
+  function openRun(id: number) {
+    $requestedDeploymentId = id;
+    $currentPage = 'history';
   }
   function createProject() {
     $newProjectRequested = true;
     $currentPage = 'projects';
   }
-  function startDeploy() {
-    if (!activeProject) return go('projects');
-    $selectedProjectName = activeProject.name;
-    $selectedConnectionName = activeConnection?.name ?? '';
-    $currentPage = 'deploy';
-  }
   function statusLabel(status: string, cancelled = false) {
-    return cancelled
-      ? 'Cancelled'
-      : status === 'completed'
-        ? 'Success'
-        : status === 'running'
-          ? 'Running'
-          : status === 'failed'
-            ? 'Failed'
-            : status === 'rolled_back'
-              ? 'Rolled back'
-              : status;
+    if (cancelled) return 'Cancelled';
+    return (
+      (
+        {
+          completed: 'Success',
+          failed: 'Failed',
+          running: 'In progress',
+          rolled_back: 'Rolled back',
+        } as Record<string, string>
+      )[status] || status
+    );
   }
 </script>
 
-<div class="view-full-height">
-  <section class="page-heading dashboard-heading">
-  <div>
-    <p class="eyebrow">WORKSPACE</p>
-    <h1>Dashboard</h1>
-    <p class="page-subtitle">
-      Your deployments, connections, and recent activity in one place.
-    </p>
-  </div>
-  <div class="dashboard-top-controls">
-    <label class="compact-field"
-      ><span>Connection</span><select
-        class="form-select"
-        bind:value={activeConnectionId}
-        disabled={!$connections.length}
-        ><option value="">No connection</option>{#each $connections as c}<option
-            value={String(c.id)}>{c.name}</option
-          >{/each}</select
-      ></label
-    >
-    <button class="btn btn-primary" on:click={createProject}>
-      <Icon name="plus" size={14} />
-      <span>New project</span>
-    </button>
-  </div>
-</section>
-
-<div class="view-scrollable">
-
-{#if loading}<div class="loading-line">Loading workspace...</div>{/if}
-
-<section class="quick-actions" aria-label="Quick actions">
-  <button class="action-tile action-primary" on:click={startDeploy}>
-    <span class="action-icon"><Icon name="upload" size={18} /></span>
-    <span class="action-copy">
-      <strong>Deploy project</strong>
-      <small>Build, back up, verify, and publish</small>
-    </span>
-    <span class="action-arrow"><Icon name="arrowUpRight" size={16} /></span>
-  </button>
-
-  <button class="action-tile" on:click={startDeploy}>
-    <span class="action-icon action-green"><Icon name="cloudUpload" size={18} /></span>
-    <span class="action-copy">
-      <strong>Backup &amp; clean</strong>
-      <small>Back up, verify, then clean stale files</small>
-    </span>
-    <span class="action-arrow"><Icon name="arrowUpRight" size={16} /></span>
-  </button>
-
-  <button class="action-tile" on:click={() => go('projects')}>
-    <span class="action-icon action-slate"><Icon name="projects" size={18} /></span>
-    <span class="action-copy">
-      <strong>Manage projects</strong>
-      <small>Configure build and publish settings</small>
-    </span>
-    <span class="action-arrow"><Icon name="arrowUpRight" size={16} /></span>
-  </button>
-
-  <button class="action-tile" on:click={() => go('connections')}>
-    <span class="action-icon action-blue"><Icon name="server" size={18} /></span>
-    <span class="action-copy">
-      <strong>Connections</strong>
-      <small>Manage FTP and explicit FTPS hosts</small>
-    </span>
-    <span class="action-arrow"><Icon name="arrowUpRight" size={16} /></span>
-  </button>
-</section>
-
-<section class="section-block">
-  <div class="section-heading">
+<div class="view-full-height dashboard-page">
+  <section class="page-heading">
     <div>
-      <h2>Active project</h2>
-      <p>Choose an environment and start your next deployment.</p>
+      <h1>Dashboard</h1>
+      <p class="page-subtitle">
+        Choose what to deploy and where. Review recent runs below.
+      </p>
     </div>
-    <button class="text-button" on:click={() => go('projects')}>
-      All projects
-    </button>
-  </div>
-  {#if activeProject}
-    <div class="active-project-row">
-      <div class="project-mark">
-        <Icon name={getProjectIcon(activeProject.projectType)} size={20} />
+  </section>
+  <div class="view-scrollable dashboard-content">
+    {#if loading}
+      <div class="files-state">
+        <Icon name="loader" size={20} spin /> Loading workspace…
       </div>
-      <div class="active-project-name">
-        <label class="compact-field project-select-field">
-          <span>Project</span>
-          <select class="form-select" bind:value={activeProjectId}>
-            {#each $projects as p}
-              <option value={String(p.id)}>{p.name}</option>
-            {/each}
-          </select>
-        </label>
-        <span>
-          <span class="badge badge-info">
-            <Icon name={getProjectIcon(activeProject.projectType)} size={12} />
-            {activeProject.projectType === 'angular' ? 'Angular' : '.NET API'}
-          </span>
-          <span class="path-label">{activeProject.localPath}</span>
-        </span>
-      </div>
-      <label class="compact-field env-field">
-        <span>Environment</span>
-        <select class="form-select" bind:value={environment}>
-          <option>Development</option>
-          <option>Production</option>
-        </select>
-        <small class="env-hint">Preset support is not connected yet</small>
-      </label>
-      <div class="connection-chip">
-        <span class="status-dot"></span>
-        <span>
-          <small>Target</small>
-          <strong>{activeConnection?.name ?? 'No connection selected'}</strong>
-        </span>
-      </div>
-      <button
-        class="btn btn-primary deploy-button"
-        on:click={startDeploy}
-        disabled={!activeConnection}
-      >
-        <Icon name="play" size={14} />
-        <span>Deploy</span>
-      </button>
-    </div>
-  {:else}
-    <div class="empty-inline">
-      <span>No project configured yet.</span>
-      <button class="btn btn-primary btn-sm" on:click={() => go('projects')}>
-        Create a project
-      </button>
-    </div>
-  {/if}
-</section>
-
-<section class="section-block activity-block">
-  <div class="section-heading">
-    <div>
-      <h2>Recent activity</h2>
-      <p>Latest deployment runs and their outcomes.</p>
-    </div>
-    <button class="text-button" on:click={() => go('history')}>
-      View history
-    </button>
-  </div>
-  {#if $deploymentHistory.length}
-    <div class="table-wrap">
-      <table class="activity-table">
-        <thead>
-          <tr>
-            <th>Project</th>
-            <th>Operation</th>
-            <th>Environment</th>
-            <th>Status</th>
-            <th>Time</th>
-            <th>Duration</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each $deploymentHistory.slice(0, 5) as d (d.id)}
-            <tr>
-              <td>
-                <strong>
-                  {$projects.find((p) => p.id === d.projectId)?.name ?? `Project #${d.projectId}`}
-                </strong>
-              </td>
-              <td>Deploy</td>
-              <td>—</td>
-              <td>
-                <span
-                  class="activity-status"
-                  class:success={d.status === 'completed'}
-                  class:failed={d.status === 'failed' && !d.cancelled}
-                  class:running={d.status === 'running'}
+    {:else}
+      {#if $deployStatus === 'running'}
+        <div class="context-notice">
+          <span
+            ><Icon name="loader" size={16} spin />
+            <strong>{$activeDeployment?.projectName || 'Deployment'}</strong> is running.</span
+          ><button class="text-button" on:click={() => openRun(0)}
+            >View live deployment <Icon name="forward" size={13} /></button
+          >
+        </div>
+      {/if}
+      <section class="card dashboard-deploy-card">
+        <div class="card-header">
+          <h2>Deploy a project</h2>
+          <span class="text-muted text-sm"
+            >Review settings before anything is published</span
+          >
+        </div>
+        <div class="card-body">
+          {#if !$projects.length || !$connections.length}
+            <div class="setup-prompt">
+              <h3>Set up your workspace</h3>
+              <p class="text-muted">
+                Add a project and a server connection to start deploying.
+              </p>
+              <div class="setup-actions">
+                {#if !$projects.length}<button
+                    class="btn btn-primary"
+                    on:click={createProject}
+                    ><Icon name="plus" size={14} /> Add project</button
+                  >{/if}{#if !$connections.length}<button
+                    class="btn btn-secondary"
+                    on:click={() => ($currentPage = 'connections')}
+                    ><Icon name="server" size={14} /> Set up connection</button
+                  >{/if}
+              </div>
+            </div>
+          {:else}
+            <div class="deploy-quick-form">
+              <div class="form-group">
+                <label class="form-label" for="dashboard-project">Project</label
+                ><select
+                  class="form-select"
+                  id="dashboard-project"
+                  bind:value={projectName}
+                  >{#each $projects as item}<option value={item.name}
+                      >{item.name}</option
+                    >{/each}</select
                 >
-                  <Icon name={getStatusIcon(d.status, d.cancelled)} size={12} />
-                  {statusLabel(d.status, d.cancelled)}
-                </span>
-              </td>
-              <td>
-                {d.startedAt
-                  ? new Date(d.startedAt).toLocaleString([], {
-                      month: 'short',
-                      day: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })
-                  : '—'}
-              </td>
-              <td>
-                {#if d.finishedAt && d.startedAt}
-                  {Math.max(
-                    1,
-                    Math.round(
-                      (new Date(d.finishedAt).getTime() - new Date(d.startedAt).getTime()) / 1000
-                    )
-                  )}s
-                {:else}
-                  —
-                {/if}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  {:else}
-    <div class="empty-inline">
-      No deployment activity yet. Your completed runs will appear here.
-    </div>
-  {/if}
-</section>
-</div>
+              </div>
+              <Icon name="forward" size={18} />
+              <div class="form-group">
+                <label class="form-label" for="dashboard-connection"
+                  >Target connection</label
+                ><select
+                  class="form-select"
+                  id="dashboard-connection"
+                  bind:value={connectionName}
+                  >{#each $connections as item}<option value={item.name}
+                      >{item.name}</option
+                    >{/each}</select
+                >
+              </div>
+              <button
+                class="btn btn-primary"
+                on:click={startDeploy}
+                disabled={!project ||
+                  !connection ||
+                  $deployStatus === 'running'}
+                ><Icon name="play" size={15} /> Review &amp; deploy</button
+              >
+            </div>
+            <div class="deploy-quick-context">
+              {#if project}<span
+                  ><Icon
+                    name={getProjectIcon(project.projectType)}
+                    size={14}
+                  /><span>{project.localPath}</span></span
+                >{/if}
+              {#if connection}<span
+                  ><Icon name="server" size={14} /><span
+                    >{connection.host}{connection.remoteRoot}</span
+                  ></span
+                >{/if}
+            </div>
+          {/if}
+        </div>
+      </section>
+
+      <section class="section-block dashboard-recent">
+        <div class="section-heading">
+          <div><h2>Recent deployments</h2></div>
+          <button
+            class="text-button"
+            on:click={() => ($currentPage = 'projects')}
+            >Browse projects <Icon name="forward" size={13} /></button
+          >
+        </div>
+        {#if $deploymentHistory.length}
+          <div class="card table-wrap">
+            <table class="activity-table">
+              <thead
+                ><tr
+                  ><th>Project</th><th>Target</th><th>Status</th><th>Started</th
+                  ><th>Duration</th></tr
+                ></thead
+              ><tbody>
+                {#each $deploymentHistory.slice(0, 5) as run (run.id)}
+                  <tr
+                    ><td
+                      ><button class="run-link" on:click={() => openRun(run.id)}
+                        >{run.projectName ||
+                          $projects.find((item) => item.id === run.projectId)
+                            ?.name ||
+                          `Project #${run.projectId}`}<span>#{run.id}</span
+                        ></button
+                      ></td
+                    ><td
+                      >{run.connectionName ||
+                        $connections.find(
+                          (item) => item.id === run.connectionId
+                        )?.name ||
+                        '—'}</td
+                    ><td
+                      ><span
+                        class="activity-status"
+                        class:success={run.status === 'completed'}
+                        class:failed={run.status === 'failed' && !run.cancelled}
+                        ><Icon
+                          name={getStatusIcon(run.status, run.cancelled)}
+                          size={12}
+                        />{statusLabel(run.status, run.cancelled)}</span
+                      ></td
+                    ><td class="text-muted">{formatDateTime(run.startedAt)}</td
+                    ><td class="text-muted"
+                      >{formatDuration(run.startedAt, run.finishedAt)}</td
+                    ></tr
+                  >
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}<div class="empty-inline">
+            No deployments yet. Your runs will appear here after the build
+            succeeds.
+          </div>{/if}
+      </section>
+    {/if}
+  </div>
 </div>

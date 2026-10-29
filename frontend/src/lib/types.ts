@@ -73,6 +73,7 @@ export interface DeployOptions {
 
 export type Page =
   | 'dashboard'
+  | 'activity'
   | 'connections'
   | 'projects'
   | 'deploy'
@@ -88,6 +89,9 @@ export interface RemoteFileDTO {
   modified?: string;
 }
 export interface TransferDTO {
+  deploymentId?: number;
+  batchId?: string;
+  batchName?: string;
   id: string;
   direction: string;
   connectionId: number;

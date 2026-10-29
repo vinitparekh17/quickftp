@@ -2,6 +2,8 @@
   import Icon from './lib/components/Icon.svelte';
   import { onMount } from 'svelte';
   import {
+    beginDeploymentAttempt,
+    updateDeploymentAttempt,
     currentPage,
     toasts,
     deployLogs,
@@ -12,7 +14,7 @@
     activityLogs,
     addToast,
   } from './lib/stores';
-  import { onEvent } from './lib/wailsjs';
+  import { getTransfers, onEvent } from './lib/wailsjs';
   import Sidebar from './lib/components/Sidebar.svelte';
   import ConnectionList from './lib/components/ConnectionList.svelte';
   import ProjectList from './lib/components/ProjectList.svelte';
@@ -21,9 +23,22 @@
   import Dashboard from './lib/components/Dashboard.svelte';
   import SettingsView from './lib/components/SettingsView.svelte';
   import FilesView from './lib/components/FilesView.svelte';
-  import TransferPanel from './lib/components/TransferPanel.svelte';
+  import ActivityView from './lib/components/ActivityView.svelte';
 
   onMount(() => {
+    // Keep activity available even when its page is not open. Events received
+    // during loading take precedence over the earlier backend snapshot.
+    void getTransfers()
+      .then((snapshot) => {
+        transfers.update((current) => {
+          const ids = new Set(current.map((item) => item.id));
+          return [...current, ...snapshot.filter((item) => !ids.has(item.id))];
+        });
+      })
+      .catch((error) =>
+        addToast('error', `Could not load transfers: ${error.message}`)
+      );
+
     // Listen for backend Wails events
     const unsubLog = onEvent(
       'deploy:log',
@@ -35,7 +50,7 @@
           second: '2-digit',
         });
         deployLogs.update((logs) => [
-          ...logs,
+          ...logs.slice(-1999),
           { ...data, line: `${stamp}  ${line}` },
         ]);
 
@@ -46,15 +61,15 @@
           deployPhase.set('verify_upload');
         else if (line.startsWith('Backup verified '))
           deployPhase.set('verify_backup');
-        else if (line.startsWith('Removing stale '))
-          deployPhase.set('delete');
+        else if (line.startsWith('Removing stale ')) deployPhase.set('delete');
       }
     );
 
     const unsubStarted = onEvent(
       'deploy:started',
       (data: { project: string; connection: string }) => {
-        deployStatus.set('running');
+        if ($deployStatus !== 'running')
+          beginDeploymentAttempt(data.project, data.connection);
       }
     );
 
@@ -62,12 +77,26 @@
       'deploy:phase',
       (data: { deploymentId: number; phase: string }) => {
         deployPhase.set(data.phase);
+        updateDeploymentAttempt({ currentPhase: data.phase });
+      }
+    );
+
+    const unsubRecorded = onEvent(
+      'deploy:recorded',
+      (data: { deploymentId: number }) => {
+        updateDeploymentAttempt({ id: data.deploymentId });
       }
     );
 
     const unsubComplete = onEvent(
       'deploy:complete',
       (data: { deploymentId: number }) => {
+        updateDeploymentAttempt({
+          id: data.deploymentId,
+          status: 'completed',
+          currentPhase: 'done',
+          finishedAt: new Date().toISOString(),
+        });
         deployStatus.set('completed');
         deployPhase.set('done');
         activeDeploymentId.set(data.deploymentId);
@@ -81,6 +110,12 @@
     const unsubError = onEvent(
       'deploy:error',
       (data: { deploymentId: number; error: string }) => {
+        updateDeploymentAttempt({
+          id: data.deploymentId,
+          status: 'failed',
+          errorMessage: data.error,
+          finishedAt: new Date().toISOString(),
+        });
         deployStatus.set('failed');
         activeDeploymentId.set(data.deploymentId);
         const stamp = new Date().toLocaleTimeString([], {
@@ -89,15 +124,15 @@
           second: '2-digit',
         });
         deployLogs.update((logs) => [
-          ...logs,
+          ...logs.slice(-1999),
           {
             stream: 'stderr',
-            line: `${stamp}  Deployment #${data.deploymentId} failed: ${data.error}`,
+            line: `${stamp}  ${data.deploymentId ? `Deployment #${data.deploymentId}` : 'Deployment preparation'} failed: ${data.error}`,
           },
         ]);
         addToast(
           'error',
-          `Deployment #${data.deploymentId} failed: ${data.error}`
+          `${data.deploymentId ? `Deployment #${data.deploymentId}` : 'Deployment preparation'} failed: ${data.error}`
         );
       }
     );
@@ -105,6 +140,13 @@
     const unsubCancelled = onEvent(
       'deploy:cancelled',
       (data: { deploymentId: number; error: string }) => {
+        updateDeploymentAttempt({
+          id: data.deploymentId || 0,
+          status: 'cancelled',
+          cancelled: true,
+          errorMessage: data.error,
+          finishedAt: new Date().toISOString(),
+        });
         deployStatus.set('cancelled');
         activeDeploymentId.set(data.deploymentId || null);
         addToast(
@@ -115,15 +157,45 @@
         );
       }
     );
+    const unsubTransferBatch = onEvent(
+      'transfer:batch',
+      (entries: import('./lib/types').TransferDTO[]) => {
+        if (!Array.isArray(entries)) return;
+        transfers.update((current) => {
+          const ids = new Set(current.map((entry) => entry.id));
+          return [
+            ...entries.filter(
+              (entry) => !entry.deploymentId && !ids.has(entry.id)
+            ),
+            ...current,
+          ];
+        });
+      }
+    );
     const unsubTransfer = onEvent('transfer:changed', (data: any) => {
-      if (!data?.id) return;
+      if (
+        !data?.id ||
+        data.deploymentId ||
+        data.direction === 'Deployment upload'
+      )
+        return;
       transfers.update((xs) => {
         const current = Array.isArray(xs) ? xs : [];
         const i = current.findIndex((x) => x.id === data.id);
-        if (i < 0) return [data, ...current];
-        const next = [...current];
-        next[i] = data;
-        return next;
+        const next = i < 0 ? [data, ...current] : [...current];
+        if (i >= 0) next[i] = data;
+        let finished = 0;
+        return next.filter(
+          (x) =>
+            [
+              'Queued',
+              'Running',
+              'Waiting',
+              'Interrupted',
+              'Failed',
+              'Cancelled',
+            ].includes(x.status) || ++finished <= 500
+        );
       });
     });
     const unsubDeployPhase = onEvent('deploy:phase', (data: any) => {
@@ -156,7 +228,7 @@
           timestamp: new Date().toISOString(),
           level: 'ERROR',
           category: 'Deployment',
-          message: `Deployment #${data.deploymentId} failed: ${data.error}`,
+          message: `${data.deploymentId ? `Deployment #${data.deploymentId}` : 'Deployment preparation'} failed: ${data.error}`,
         },
       ])
     );
@@ -173,7 +245,11 @@
               : 'Transfer';
         activityLogs.update((xs) => [
           ...xs.slice(-999),
-          { ...data, category, message: line.replace(/^(BUILD|DEPLOYMENT) /, '') },
+          {
+            ...data,
+            category,
+            message: line.replace(/^(BUILD|DEPLOYMENT) /, ''),
+          },
         ]);
       }
     });
@@ -182,9 +258,11 @@
       unsubLog();
       unsubStarted();
       unsubPhase();
+      unsubRecorded();
       unsubComplete();
       unsubError();
       unsubCancelled();
+      unsubTransferBatch();
       unsubTransfer();
       unsubDeployPhase();
       unsubDeployResult();
@@ -207,17 +285,16 @@
         <ConnectionList />
       {:else if $currentPage === 'projects'}
         <ProjectList />
-
-
-      {:else if $currentPage === "history" || $currentPage === "deploy"}
+      {:else if $currentPage === 'history' || $currentPage === 'deploy'}
         <DeployView />
       {:else if $currentPage === 'settings'}
         <SettingsView />
       {:else if $currentPage === 'files'}
         <FilesView />
+      {:else if $currentPage === 'activity'}
+        <ActivityView />
       {/if}
     </main>
-    <TransferPanel />
   </div>
 </div>
 
@@ -234,5 +311,3 @@
     <span>{t.message}</span>
   </div>
 {/each}
-
-

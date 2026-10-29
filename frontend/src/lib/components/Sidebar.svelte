@@ -1,10 +1,20 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
-  import { currentPage, pendingDeployments } from '../stores';
+  import {
+    currentPage,
+    pendingDeployments,
+    transferSummary,
+    deployStatus,
+    requestedDeploymentId,
+    activeDeployment,
+    deploymentProjectId,
+  } from '../stores';
   import type { Page } from '../types';
   import appIcon from '../../assets/quickftp-icon.png';
 
   function setPage(page: Page) {
+    if (page === 'history' && $deployStatus === 'running')
+      $requestedDeploymentId = 0;
     $currentPage = page;
   }
 </script>
@@ -36,7 +46,7 @@
 
     <button
       class="sidebar-nav-item"
-      class:active={$currentPage === 'projects'}
+      class:active={['projects', 'history', 'deploy'].includes($currentPage)}
       on:click={() => setPage('projects')}
     >
       <Icon name="projects" size={18} />
@@ -54,18 +64,19 @@
 
     <button
       class="sidebar-nav-item"
-      class:active={$currentPage === 'history' || $currentPage === 'deploy'}
-      on:click={() => setPage('history')}
+      class:active={$currentPage === 'activity'}
+      on:click={() => setPage('activity')}
     >
-      <Icon name="deploy" size={18} />
-      <span>Deployments</span>
-      {#if $pendingDeployments.length > 0}
+      <Icon name="transfer" size={18} />
+      <span>Activity</span>
+      {#if $transferSummary.attention || $transferSummary.active}
         <span
-          class="badge badge-warning"
-          style="margin-left: auto; font-size: 10px;"
+          class="sidebar-count"
+          class:needs-attention={$transferSummary.attention > 0}
+          title={`${$transferSummary.activeBatches} active transfer batches; ${$transferSummary.attentionBatches} batches with ${$transferSummary.attention} files needing attention`}
+          >{$transferSummary.attentionBatches ||
+            $transferSummary.activeBatches}</span
         >
-          {$pendingDeployments.length}
-        </span>
       {/if}
     </button>
 
@@ -78,6 +89,15 @@
       <span>Settings</span>
     </button>
   </nav>
+
+  {#if $deployStatus === 'running'}<button
+      class="sidebar-nav-item"
+      on:click={() => {
+        $deploymentProjectId = $activeDeployment?.projectId || null;
+        $requestedDeploymentId = 0;
+        $currentPage = 'history';
+      }}><Icon name="loader" size={15} spin /> Live deployment</button
+    >{/if}
 
   <div class="sidebar-footer">QuickFTP v0.1.0 • Desktop</div>
 </aside>

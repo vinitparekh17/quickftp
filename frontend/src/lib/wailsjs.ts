@@ -9,6 +9,7 @@
 //          GetPendingDeployments, GetDeploymentFiles } from '../../wailsjs/go/main/App';
 // import { EventsOn } from '../../wailsjs/runtime/runtime';
 
+import { loadProjectDeployments } from './projectHistory';
 import type {
   ConnectionDTO,
   ProjectDTO,
@@ -19,6 +20,8 @@ import type {
   TransferDTO,
 } from './types';
 import {
+  beginDeploymentAttempt,
+  updateDeploymentAttempt,
   deployLogs,
   deployPhase,
   deployStatus,
@@ -337,7 +340,11 @@ export async function deleteRemoteEntry(
 ): Promise<void> {
   if (!isWails)
     throw new Error('Remote file deletion requires the QuickFTP desktop app');
-  return await window.go.main.App.DeleteRemoteEntry(connectionId, remotePath, isDir);
+  return await window.go.main.App.DeleteRemoteEntry(
+    connectionId,
+    remotePath,
+    isDir
+  );
 }
 export async function queueDownload(
   connectionId: number,
@@ -395,6 +402,28 @@ export async function getTransfers(): Promise<TransferDTO[]> {
   if (!isWails) return [];
   return (await window.go.main.App.GetTransfers()) || [];
 }
+export async function clearTransferHistory(connectionId = 0): Promise<void> {
+  const removed: string[] = isWails
+    ? await window.go.main.App.ClearTransferHistory(connectionId)
+    : [];
+  const ids = new Set(removed);
+  transfers.update((items) => items.filter((item) => !ids.has(item.id)));
+}
+export async function getDeploymentLogs(
+  id: number,
+  offset = 0,
+  limit = 50
+): Promise<{
+  entries: { id: number; stream: string; line: string; createdAt: string }[];
+  total: number;
+}> {
+  if (!isWails) return { entries: [], total: 0 };
+  return await window.go.main.App.GetDeploymentLogs(id, offset, limit);
+}
+export async function clearDeploymentLogs(id: number): Promise<void> {
+  if (isWails) await window.go.main.App.ClearDeploymentLogs(id);
+}
+
 export async function cancelTransfer(id: string): Promise<void> {
   if (isWails) return await window.go.main.App.CancelTransfer(id);
 }
@@ -406,7 +435,8 @@ export async function resolveTransferConflict(
     return await window.go.main.App.ResolveTransferConflict(id, policy);
 }
 export async function retryTransfer(id: string): Promise<void> {
-  if (isWails) return await window.go.main.App.RetryTransfer(id);
+  if (isWails) await window.go.main.App.RetryTransfer(id);
+  transfers.update((items) => items.filter((item) => item.id !== id));
 }
 export async function removeTransfer(id: string): Promise<void> {
   if (isWails) await window.go.main.App.RemoveTransfer(id);
@@ -491,18 +521,33 @@ export async function startDeploy(
   connectionName: string,
   opts: DeployOptions
 ): Promise<void> {
+  beginDeploymentAttempt(projectName, connectionName);
   if (isWails) {
-    return await window.go.main.App.StartDeploy(
-      projectName,
-      connectionName,
-      opts
-    );
+    try {
+      await window.go.main.App.StartDeploy(projectName, connectionName, opts);
+    } catch (error: any) {
+      deployStatus.set('failed');
+      updateDeploymentAttempt({
+        status: 'failed',
+        errorMessage: error?.message || String(error),
+        finishedAt: new Date().toISOString(),
+      });
+      throw error;
+    }
+    return;
   }
+  void simulateMockDeployment(projectName, connectionName);
+}
 
+async function simulateMockDeployment(
+  projectName: string,
+  connectionName: string
+) {
   // Mock deployment simulation
   const deployId = ++mockDeploymentId;
   mockCancelRequested = false;
   activeDeploymentId.set(deployId);
+  updateDeploymentAttempt({ id: deployId });
   deployStatus.set('running');
   deployLogs.set([]);
   deployPhase.set('build');
@@ -549,6 +594,11 @@ export async function startDeploy(
         },
       ]);
       deployStatus.set('cancelled');
+      updateDeploymentAttempt({
+        status: 'cancelled',
+        cancelled: true,
+        finishedAt: new Date().toISOString(),
+      });
       mockDeployments.unshift({
         id: deployId,
         projectId: mockProjects.find((p) => p.name === projectName)?.id ?? 0,
@@ -585,6 +635,11 @@ export async function startDeploy(
   }
 
   deployStatus.set('completed');
+  updateDeploymentAttempt({
+    status: 'completed',
+    currentPhase: 'done',
+    finishedAt: new Date().toISOString(),
+  });
 
   mockDeployments.unshift({
     id: deployId,
@@ -620,6 +675,16 @@ export async function rollbackDeployment(
   if (dep) dep.status = 'rolled_back';
 }
 
+export async function getProjectDeployments(
+  projectId: number,
+  limit = 200
+): Promise<DeploymentDTO[]> {
+  if (isWails)
+    return loadProjectDeployments(window.go.main.App, projectId, limit);
+  return mockDeployments
+    .filter((run) => run.projectId === projectId)
+    .slice(0, limit);
+}
 export async function getDeploymentHistory(
   limit: number
 ): Promise<DeploymentDTO[]> {
@@ -630,9 +695,7 @@ export async function getDeploymentHistory(
   return [...mockDeployments].slice(0, limit);
 }
 
-export async function getDeployment(
-  id: number
-): Promise<DeploymentDTO | null> {
+export async function getDeployment(id: number): Promise<DeploymentDTO | null> {
   if (isWails) {
     return await window.go.main.App.GetDeployment(id);
   }
@@ -673,10 +736,7 @@ export function onEvent(
 ): () => void {
   if (isWails && window.runtime?.EventsOn) {
     // Use real Wails event system
-    window.runtime.EventsOn(eventName, callback);
-    return () => {
-      window.runtime.EventsOff(eventName);
-    };
+    return window.runtime.EventsOn(eventName, callback);
   }
 
   // Mock event system

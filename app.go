@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,9 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/jlaffaye/ftp"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"quickftp/internal/creds"
@@ -106,6 +105,9 @@ type SettingsDTO struct {
 // App holds the application state shared with the Wails runtime.
 type App struct {
 	ctx             context.Context
+	appCancel       context.CancelFunc
+	deployWorkers   sync.WaitGroup
+	closing         bool
 	db              *storage.DB
 	creds           creds.Store
 	service         *deploy.Service
@@ -121,6 +123,7 @@ type App struct {
 
 // startup is called by Wails after the frontend is ready.
 func (a *App) startup(ctx context.Context) {
+	ctx, a.appCancel = context.WithCancel(ctx)
 	a.ctx = ctx
 
 	paths, err := storage.InitAppPaths()
@@ -165,6 +168,7 @@ func (a *App) startup(ctx context.Context) {
 	a.settings = settings
 	a.gate = transfer.NewGate(settings.MaxConcurrent)
 	a.activity = transfer.OpenActivityManager(filepath.Join(paths.RootDir, "transfer-recovery.json"), a.gate)
+	a.activity.OnBatchChange = func(values []transfer.Activity) { wailsRuntime.EventsEmit(ctx, "transfer:batch", values) }
 	a.activity.OnChange = func(v transfer.Activity) { wailsRuntime.EventsEmit(ctx, "transfer:changed", v) }
 	a.activity.OnLog = func(level, line string) {
 		wailsRuntime.EventsEmit(ctx, "transfer:log", map[string]string{"level": level, "message": line, "timestamp": time.Now().Format(time.RFC3339)})
@@ -181,6 +185,8 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) GetSettings() SettingsDTO {
+	a.deployMu.Lock()
+	defer a.deployMu.Unlock()
 	s := a.settings
 	s.BackupDir = a.service.BackupRoot
 	return s
@@ -247,6 +253,20 @@ func (a *App) SaveSettings(settings SettingsDTO) error {
 
 // shutdown is called by Wails when the application is closing.
 func (a *App) shutdown(_ context.Context) {
+	a.deployMu.Lock()
+	a.closing = true
+	if a.appCancel != nil {
+		a.appCancel()
+	}
+	if a.deployCancel != nil {
+		a.deployCancel()
+	}
+	a.deployMu.Unlock()
+	if a.activity != nil {
+		a.activity.Close()
+	}
+	a.deployWorkers.Wait()
+
 	a.explorerMu.Lock()
 	for id, cl := range a.explorerClients {
 		if cl != nil {
@@ -281,6 +301,14 @@ func (a *App) GetConnections() ([]ConnectionDTO, error) {
 // SaveConnection upserts a connection profile and persists the password in the OS credential store.
 func (a *App) SaveConnection(dto ConnectionDTO) error {
 	targetKey := creds.FormatTargetKey(dto.Name)
+	if dto.ID > 0 {
+		saved, err := a.connectionByID(dto.ID)
+		if err != nil {
+			return err
+		}
+		// Keep the credential identity stable across display-name changes.
+		targetKey = saved.CredTargetKey
+	}
 	c := &storage.Connection{
 		ID:            dto.ID,
 		Name:          dto.Name,
@@ -292,8 +320,14 @@ func (a *App) SaveConnection(dto ConnectionDTO) error {
 		TLSVerify:     dto.TLSVerify,
 		CredTargetKey: targetKey,
 	}
-	if err := a.db.UpsertConnection(c); err != nil {
-		return fmt.Errorf("save connection: %w", err)
+	var saveErr error
+	if dto.ID > 0 {
+		saveErr = a.db.UpdateConnection(c)
+	} else {
+		saveErr = a.db.UpsertConnection(c)
+	}
+	if saveErr != nil {
+		return fmt.Errorf("save connection: %w", saveErr)
 	}
 	if dto.Password != "" {
 		if err := a.creds.SavePassword(targetKey, dto.Username, dto.Password); err != nil {
@@ -346,38 +380,24 @@ func (a *App) DeleteConnection(id int64) error {
 
 // TestConnection attempts to dial, authenticate, and disconnect.
 func (a *App) TestConnection(dto ConnectionDTO) error {
-	port := dto.Port
-	if port == 0 {
-		port = 21
-	}
-	addr := fmt.Sprintf("%s:%d", dto.Host, port)
-	opts := []ftp.DialOption{
-		ftp.DialWithTimeout(15 * time.Second),
-	}
-
-	protocol := storage.Protocol(dto.Protocol)
-	if protocol == storage.ProtocolFTPSExplicit {
-		tlsConfig := &tls.Config{
-			ServerName:         dto.Host,
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: !dto.TLSVerify,
+	password := dto.Password
+	if password == "" && dto.ID > 0 {
+		saved, err := a.connectionByID(dto.ID)
+		if err != nil {
+			return err
 		}
-		if port == 990 {
-			opts = append(opts, ftp.DialWithTLS(tlsConfig))
-		} else {
-			opts = append(opts, ftp.DialWithExplicitTLS(tlsConfig))
+		password, err = a.creds.GetPassword(saved.CredTargetKey)
+		if err != nil {
+			return fmt.Errorf("read connection credential: %w", err)
 		}
 	}
-
-	conn, err := ftp.Dial(addr, opts...)
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
-	}
-	if err := conn.Login(dto.Username, dto.Password); err != nil {
-		_ = conn.Quit()
-		return fmt.Errorf("login: %w", err)
-	}
-	return conn.Quit()
+	client := &transfer.FTPClient{Config: transfer.FTPConfig{
+		Host: dto.Host, Port: dto.Port, Protocol: storage.Protocol(dto.Protocol),
+		Username: dto.Username, Password: password, TLSVerify: dto.TLSVerify, Timeout: 15 * time.Second,
+	}}
+	ctx, cancel := context.WithTimeout(a.ctx, 15*time.Second)
+	defer cancel()
+	return client.Test(ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -423,35 +443,34 @@ func (a *App) DeleteProject(id int64) error {
 // StartDeploy kicks off a deployment in a background goroutine and emits events.
 func (a *App) StartDeploy(projectName, connectionName string, opts DeployOptions) error {
 	a.deployMu.Lock()
-	if a.deployCancel != nil {
+	if a.closing || a.deployCancel != nil {
 		a.deployMu.Unlock()
 		return fmt.Errorf("a deployment is already running")
 	}
 	deployCtx, cancel := context.WithCancel(a.ctx)
 	a.deployCancel = cancel
+	a.deployWorkers.Add(1)
+	service := *a.service
 	a.deployMu.Unlock()
-	// Wire the build-log callback to emit events to the frontend.
-	a.service.BuildLog = func(stream, line string) {
-		level := "INFO"
-		if strings.EqualFold(stream, "stderr") {
-			level = "ERROR"
+
+	var runID atomic.Int64
+	recordLog := func(stream, line string) {
+		id := runID.Load()
+		if id > 0 {
+			if err := a.db.AppendDeploymentLog(id, stream, line); err != nil {
+				wailsRuntime.LogError(a.ctx, "Could not persist deployment log: "+err.Error())
+			}
 		}
-		a.activity.RecordLog(level, "BUILD "+line)
-		wailsRuntime.EventsEmit(a.ctx, "deploy:log", map[string]string{
-			"stream": stream,
-			"line":   line,
-		})
+		wailsRuntime.EventsEmit(a.ctx, "deploy:log", map[string]interface{}{"deploymentId": id, "stream": stream, "line": line})
 	}
-	a.service.PhaseLog = func(phase string) {
+	service.BuildLog = recordLog
+	service.TransferLog = recordLog
+	service.DeploymentStarted = func(id int64) {
+		runID.Store(id)
+		wailsRuntime.EventsEmit(a.ctx, "deploy:recorded", map[string]interface{}{"deploymentId": id})
+	}
+	service.PhaseLog = func(phase string) {
 		wailsRuntime.EventsEmit(a.ctx, "deploy:phase", map[string]interface{}{"phase": phase})
-	}
-	a.service.TransferLog = func(stream, line string) {
-		level := "INFO"
-		if strings.EqualFold(stream, "stderr") {
-			level = "ERROR"
-		}
-		a.activity.RecordLog(level, "DEPLOYMENT "+line)
-		wailsRuntime.EventsEmit(a.ctx, "deploy:log", map[string]string{"stream": stream, "line": line})
 	}
 
 	deployOpts := deploy.Options{
@@ -460,6 +479,7 @@ func (a *App) StartDeploy(projectName, connectionName string, opts DeployOptions
 	}
 
 	go func() {
+		defer a.deployWorkers.Done()
 		defer func() {
 			cancel()
 			a.deployMu.Lock()
@@ -471,8 +491,9 @@ func (a *App) StartDeploy(projectName, connectionName string, opts DeployOptions
 			"connection": connectionName,
 		})
 
-		deploymentID, err := a.service.DeployProject(deployCtx, projectName, connectionName, deployOpts)
+		deploymentID, err := service.DeployProject(deployCtx, projectName, connectionName, deployOpts)
 		if err != nil {
+			recordLog("stderr", err.Error())
 			event := "deploy:error"
 			if deployCtx.Err() == context.Canceled {
 				event = "deploy:cancelled"
@@ -505,7 +526,24 @@ func (a *App) CancelDeploy() error {
 
 // RollbackDeployment rolls back a specific deployment.
 func (a *App) RollbackDeployment(deploymentID int64, connectionName string) error {
-	return a.service.Rollback(a.ctx, deploymentID, connectionName)
+	a.deployMu.Lock()
+	if a.closing || a.deployCancel != nil {
+		a.deployMu.Unlock()
+		return fmt.Errorf("a deployment or rollback is already running")
+	}
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.deployCancel = cancel
+	a.deployWorkers.Add(1)
+	service := *a.service
+	a.deployMu.Unlock()
+	defer a.deployWorkers.Done()
+	defer func() {
+		cancel()
+		a.deployMu.Lock()
+		a.deployCancel = nil
+		a.deployMu.Unlock()
+	}()
+	return service.Rollback(ctx, deploymentID, connectionName)
 }
 
 func (a *App) ListRemoteDirectory(connectionID int64, remotePath string) ([]transfer.RemoteFile, error) {
@@ -531,6 +569,7 @@ func (a *App) ListRemoteDirectory(connectionID int64, remotePath string) ([]tran
 	return files, nil
 }
 func (a *App) QueueDownload(connectionID int64, remotePath, localPath string, size int64) (transfer.Activity, error) {
+	settings := a.GetSettings()
 	c, err := a.connectionByID(connectionID)
 	if err != nil {
 		return transfer.Activity{}, err
@@ -538,7 +577,7 @@ func (a *App) QueueDownload(connectionID int64, remotePath, localPath string, si
 	if err = safeExplorerPath(c.RemoteRoot, remotePath); err != nil {
 		return transfer.Activity{}, err
 	}
-	localPath, err = safeLocalDestination(a.settings.DownloadDir, localPath)
+	localPath, err = safeLocalDestination(settings.DownloadDir, localPath)
 	if err != nil {
 		return transfer.Activity{}, err
 	}
@@ -547,9 +586,10 @@ func (a *App) QueueDownload(connectionID int64, remotePath, localPath string, si
 	if err != nil {
 		return transfer.Activity{}, err
 	}
-	return a.activity.AddDownload(c.ID, c.Name, remotePath, localPath, size, a.settings.DownloadConflict, client)
+	return a.activity.AddDownload(c.ID, c.Name, remotePath, localPath, size, settings.DownloadConflict, client)
 }
 func (a *App) QueueDownloadDirectory(connectionID int64, remotePath string) ([]transfer.Activity, error) {
+	settings := a.GetSettings()
 	c, e := a.connectionByID(connectionID)
 	if e != nil {
 		return nil, e
@@ -564,14 +604,15 @@ func (a *App) QueueDownloadDirectory(connectionID int64, remotePath string) ([]t
 	}
 	root := path.Clean("/" + c.RemoteRoot)
 	selectedRel := strings.TrimPrefix(strings.TrimPrefix(remotePath, root), "/")
-	selectedDir := filepath.Join(a.settings.DownloadDir, filepath.FromSlash(selectedRel))
-	selectedDir, e = safeLocalDestination(a.settings.DownloadDir, selectedDir)
+	selectedDir := filepath.Join(settings.DownloadDir, filepath.FromSlash(selectedRel))
+	selectedDir, e = safeLocalDestination(settings.DownloadDir, selectedDir)
 	if e != nil {
 		return nil, e
 	}
 	if e = os.MkdirAll(selectedDir, 0700); e != nil {
 		return nil, e
 	}
+	batch := transfer.NewTransferBatch(path.Base(remotePath))
 	queued := []transfer.Activity{}
 	var walk func(string, int) error
 	walk = func(dir string, depth int) error {
@@ -585,8 +626,8 @@ func (a *App) QueueDownloadDirectory(connectionID int64, remotePath string) ([]t
 		for _, item := range items {
 			if item.IsDir {
 				rel := strings.TrimPrefix(strings.TrimPrefix(item.Path, root), "/")
-				local := filepath.Join(a.settings.DownloadDir, filepath.FromSlash(rel))
-				local, err = safeLocalDestination(a.settings.DownloadDir, local)
+				local := filepath.Join(settings.DownloadDir, filepath.FromSlash(rel))
+				local, err = safeLocalDestination(settings.DownloadDir, local)
 				if err != nil {
 					return err
 				}
@@ -602,12 +643,12 @@ func (a *App) QueueDownloadDirectory(connectionID int64, remotePath string) ([]t
 			if rel == "" || strings.HasPrefix(rel, "../") {
 				return fmt.Errorf("unsafe path returned by server")
 			}
-			local := filepath.Join(a.settings.DownloadDir, filepath.FromSlash(rel))
-			local, err = safeLocalDestination(a.settings.DownloadDir, local)
+			local := filepath.Join(settings.DownloadDir, filepath.FromSlash(rel))
+			local, err = safeLocalDestination(settings.DownloadDir, local)
 			if err != nil {
 				return err
 			}
-			job, err := a.activity.AddDownload(c.ID, c.Name, item.Path, local, item.Size, a.settings.DownloadConflict, client)
+			job, err := a.activity.AddDownload(c.ID, c.Name, item.Path, local, item.Size, settings.DownloadConflict, client, batch)
 			if err != nil {
 				return err
 			}
@@ -621,6 +662,7 @@ func (a *App) QueueDownloadDirectory(connectionID int64, remotePath string) ([]t
 	return queued, nil
 }
 func (a *App) QueueUpload(connectionID int64, localPath, remotePath string) (transfer.Activity, error) {
+	settings := a.GetSettings()
 	c, e := a.connectionByID(connectionID)
 	if e != nil {
 		return transfer.Activity{}, e
@@ -633,9 +675,10 @@ func (a *App) QueueUpload(connectionID int64, localPath, remotePath string) (tra
 	if e != nil {
 		return transfer.Activity{}, e
 	}
-	return a.activity.AddUpload(c.ID, c.Name, remotePath, localPath, a.settings.UploadConflict, client)
+	return a.activity.AddUpload(c.ID, c.Name, remotePath, localPath, settings.UploadConflict, client)
 }
 func (a *App) QueueUploadDirectory(connectionID int64, localDir, remotePath string) ([]transfer.Activity, error) {
+	settings := a.GetSettings()
 	c, e := a.connectionByID(connectionID)
 	if e != nil {
 		return nil, e
@@ -649,7 +692,8 @@ func (a *App) QueueUploadDirectory(connectionID int64, localDir, remotePath stri
 		return nil, e
 	}
 	base := filepath.Clean(localDir)
-	queued := []transfer.Activity{}
+	batch := transfer.NewTransferBatch(filepath.Base(base))
+	requests := []transfer.UploadRequest{}
 	e = filepath.WalkDir(base, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -668,15 +712,20 @@ func (a *App) QueueUploadDirectory(connectionID int64, localDir, remotePath stri
 		if err = safeExplorerPath(c.RemoteRoot, remote); err != nil {
 			return err
 		}
-		job, err := a.activity.AddUpload(c.ID, c.Name, remote, p, a.settings.UploadConflict, client)
-		if err != nil {
-			return err
-		}
-		queued = append(queued, job)
+		requests = append(requests, transfer.UploadRequest{RemotePath: remote, LocalPath: p})
 		return nil
 	})
-	return queued, e
+	if e != nil {
+		return nil, e
+	}
+	return a.activity.AddUploads(c.ID, c.Name, requests, settings.UploadConflict, client, batch)
 }
+
+// ClearTransferHistory clears completed/failed/interrupted rows for one connection (0 means all).
+func (a *App) ClearTransferHistory(connectionID int64) ([]string, error) {
+	return a.activity.ClearHistory(connectionID)
+}
+
 func (a *App) GetTransfers() []transfer.Activity { return a.activity.List() }
 func (a *App) CancelTransfer(id string) error    { return a.activity.Cancel(id) }
 func (a *App) ResolveTransferConflict(id, policy string) error {
@@ -686,11 +735,30 @@ func (a *App) RemoveTransfer(id string) { a.activity.Remove(id) }
 func (a *App) RetryTransfer(id string) error {
 	for _, x := range a.activity.List() {
 		if x.ID == id {
+			if c, err := a.connectionByID(x.ConnectionID); err == nil {
+				client, err := a.explorerClient(c)
+				if err != nil {
+					return err
+				}
+				return a.activity.Retry(id, client)
+			}
 			pw, e := a.creds.GetPassword(x.Profile.CredentialKey)
 			if e != nil {
 				return fmt.Errorf("read connection credential for retry: %w", e)
 			}
-			client := &transfer.FTPClient{Config: transfer.FTPConfig{Host: x.Profile.Host, Port: x.Profile.Port, Protocol: storage.Protocol(x.Profile.Protocol), Username: x.Profile.Username, Password: pw, TLSVerify: x.Profile.TLSVerify, CredentialKey: x.Profile.CredentialKey, ReuseConnection: true}}
+			client := &transfer.FTPClient{
+				Config: transfer.FTPConfig{
+					Host:            x.Profile.Host,
+					Port:            x.Profile.Port,
+					Protocol:        storage.Protocol(x.Profile.Protocol),
+					Username:        x.Profile.Username,
+					Password:        pw,
+					TLSVerify:       x.Profile.TLSVerify,
+					CredentialKey:   x.Profile.CredentialKey,
+					ReuseConnection: true,
+					ForceListHidden: true,
+				},
+			}
 			return a.activity.Retry(id, client)
 		}
 	}
@@ -713,7 +781,19 @@ func (a *App) ftpClient(c *storage.Connection) (*transfer.FTPClient, error) {
 	if e != nil {
 		return nil, fmt.Errorf("read connection credential: %w", e)
 	}
-	return &transfer.FTPClient{Config: transfer.FTPConfig{Host: c.Host, Port: c.Port, Protocol: c.Protocol, Username: c.Username, Password: pw, TLSVerify: c.TLSVerify, CredentialKey: c.CredTargetKey, ReuseConnection: true}}, nil
+	return &transfer.FTPClient{
+		Config: transfer.FTPConfig{
+			Host:            c.Host,
+			Port:            c.Port,
+			Protocol:        c.Protocol,
+			Username:        c.Username,
+			Password:        pw,
+			TLSVerify:       c.TLSVerify,
+			CredentialKey:   c.CredTargetKey,
+			ReuseConnection: true,
+			ForceListHidden: true,
+		},
+	}, nil
 }
 
 func (a *App) explorerClient(c *storage.Connection) (*transfer.FTPClient, error) {
@@ -728,9 +808,7 @@ func (a *App) explorerClient(c *storage.Connection) (*transfer.FTPClient, error)
 		return nil, err
 	}
 	if existing := a.explorerClients[c.ID]; existing != nil {
-		old := existing.Config
-		fresh := client.Config
-		if old.Host == fresh.Host && old.Port == fresh.Port && old.Protocol == fresh.Protocol && old.Username == fresh.Username && old.Password == fresh.Password && old.TLSVerify == fresh.TLSVerify && old.CredentialKey == fresh.CredentialKey {
+		if existing.Config == client.Config {
 			return existing, nil
 		}
 		_ = existing.Close()
@@ -855,6 +933,25 @@ func safeLocalDestination(root, dest string) (string, error) {
 	}
 	return target, nil
 }
+
+func (a *App) GetProjectDeployments(projectID int64, limit int) ([]DeploymentDTO, error) {
+	if limit < 1 || limit > 500 {
+		limit = 200
+	}
+	records, err := a.db.ListDeployments(limit, projectID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DeploymentDTO, len(records))
+	for i, record := range records {
+		out[i] = a.deploymentToDTO(record)
+	}
+	return out, nil
+}
+func (a *App) GetDeploymentLogs(id int64, offset, limit int) (storage.DeploymentLogPage, error) {
+	return a.db.DeploymentLogs(id, offset, limit)
+}
+func (a *App) ClearDeploymentLogs(id int64) error { return a.db.ClearDeploymentLogs(id) }
 
 // GetDeploymentHistory returns the most recent deployments.
 func (a *App) GetDeploymentHistory(limit int) ([]DeploymentDTO, error) {

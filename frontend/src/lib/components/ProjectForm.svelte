@@ -21,7 +21,7 @@
     ? project.outputRelPath
     : projectType === 'angular'
       ? 'dist'
-      : 'bin/Release/net8.0/publish';
+      : 'auto';
   let artifactRulesJson = project ? project.artifactRulesJson : '';
   let activeTab = 'general';
   let includeText = '';
@@ -51,7 +51,7 @@
         outputRelPath = 'dist';
       } else {
         buildCommand = 'dotnet publish -c Release';
-        outputRelPath = 'bin/Release/net8.0/publish';
+        outputRelPath = 'auto';
       }
     }
   }
@@ -67,12 +67,6 @@
     }
     if (!outputRelPath.trim()) {
       errorMsg = 'Output relative path is required';
-      return;
-    }
-    if (projectType === 'dotnet' && !includeText.trim()) {
-      activeTab = 'files';
-      errorMsg =
-        'For .NET projects, add the DLLs and runtime paths to the include list so only selected publish files are uploaded.';
       return;
     }
 
@@ -136,7 +130,12 @@
   <div class="modal project-modal">
     <div class="modal-header">
       <h3>{project ? 'Edit Project' : 'New Project'}</h3>
-      <button class="modal-close" on:click={handleCancel} aria-label="Close dialog" title="Close"><Icon name="close" size={16} /></button>
+      <button
+        class="modal-close"
+        on:click={handleCancel}
+        aria-label="Close dialog"
+        title="Close"><Icon name="close" size={16} /></button
+      >
     </div>
 
     <div class="project-tabs" role="tablist" aria-label="Project settings">
@@ -200,7 +199,8 @@
             /><button
               class="btn btn-secondary"
               type="button"
-              on:click={chooseProjectDirectory}><Icon name="folder" size={14} /> Browse…</button
+              on:click={chooseProjectDirectory}
+              ><Icon name="folder" size={14} /> Browse…</button
             >
           </div>
           <div class="form-hint">
@@ -230,11 +230,18 @@
             class="form-input"
             type="text"
             bind:value={outputRelPath}
-            placeholder="dist/browser or bin/Release/net8.0/publish"
+            placeholder={projectType === 'dotnet'
+              ? 'auto (detect project and .NET target)'
+              : 'dist/browser'}
           />
           <div class="form-hint">
-            Path relative to project root containing the compiled files to
-            upload
+            {#if projectType === 'dotnet'}
+              Use auto to detect the application and target framework. Custom
+              build commands need an explicit output path.
+            {:else}
+              Path relative to project root containing the compiled files to
+              upload
+            {/if}
           </div>
         </div>
       {:else if activeTab === 'files'}
@@ -250,8 +257,10 @@
               placeholder={'*.dll\nruntime/**\nwwwroot/**'}
             ></textarea>
             <div class="form-hint">
-              One relative path or glob per line. .NET projects should list the
-              DLLs to publish.
+              Optional: one relative path or glob per line. Leave empty to
+              publish the entire output directory. For a new .NET API, this
+              includes dependencies, runtime files, configuration, and generated
+              web.config.
             </div>
           </div>
           <div class="form-group">

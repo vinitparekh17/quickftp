@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import Icon from '../Icon.svelte';
   import { getProjectIcon } from '../../icons';
   import type { ProjectDTO, ConnectionDTO } from '../../types';
@@ -19,7 +19,8 @@
   let selectedProject =
     initialProjectName || (projects.length > 0 ? projects[0].name : '');
   let selectedConnection =
-    initialConnectionName || (connections.length > 0 ? connections[0].name : '');
+    initialConnectionName ||
+    (connections.length > 0 ? connections[0].name : '');
 
   let enableIISOffline = false;
   let iisShutdownDelay = 1500;
@@ -27,12 +28,34 @@
     '<!DOCTYPE html><html><head><title>App Offline</title></head><body><h1>Maintenance in Progress</h1><p>The application is currently being updated. Please check back shortly.</p></body></html>';
 
   let isSubmitting = false;
+  let dialogElement: HTMLDivElement;
+  onMount(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    dialogElement.querySelector('select')?.focus();
+    return () => previous?.focus();
+  });
 
   $: activeProject = projects.find((p) => p.name === selectedProject) || null;
   $: activeConnection =
     connections.find((c) => c.name === selectedConnection) || null;
 
   function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Tab') {
+      const controls = Array.from(
+        dialogElement.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), select:not(:disabled), input:not(:disabled), textarea:not(:disabled)'
+        )
+      ).filter((element) => element.getClientRects().length > 0);
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last?.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first?.focus();
+      }
+    }
     if (e.key === 'Escape' && !isSubmitting) {
       dispatch('close');
     }
@@ -54,7 +77,10 @@
     isSubmitting = true;
     try {
       await startDeploy(selectedProject, selectedConnection, {
-        iisOfflinePage: enableIISOffline ? iisOfflineHtml : '',
+        iisOfflinePage:
+          activeProject?.projectType === 'dotnet' && enableIISOffline
+            ? iisOfflineHtml
+            : '',
         iisShutdownDelay: Number(iisShutdownDelay) || 1500,
       });
 
@@ -79,14 +105,15 @@
 
 <!-- Accessible modal backdrop -->
 <div
-  class="modal-backdrop"
+  class="modal-overlay"
   on:click={() => !isSubmitting && dispatch('close')}
   role="presentation"
 >
   <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
   <div
-    class="modal-box new-deploy-modal"
+    class="modal new-deploy-modal"
+    bind:this={dialogElement}
     on:click|stopPropagation
     role="dialog"
     aria-modal="true"
@@ -111,7 +138,7 @@
     <div class="modal-body new-deploy-body">
       <!-- Section 1: Target Selections -->
       <div class="deploy-flow-step">
-        <div class="step-label">1. Select Project &amp; Target Host</div>
+        <div class="step-label">Project &amp; target</div>
         <div class="form-row">
           <div class="form-group mb-2">
             <label class="form-label" for="new-deploy-proj">Project</label>
@@ -126,7 +153,9 @@
               {:else}
                 {#each projects as p}
                   <option value={p.name}>
-                    {p.name} ({p.projectType === 'angular' ? 'Angular' : '.NET'})
+                    {p.name} ({p.projectType === 'angular'
+                      ? 'Angular'
+                      : '.NET'})
                   </option>
                 {/each}
               {/if}
@@ -134,7 +163,9 @@
           </div>
 
           <div class="form-group mb-2">
-            <label class="form-label" for="new-deploy-conn">Target Connection</label>
+            <label class="form-label" for="new-deploy-conn"
+              >Target Connection</label
+            >
             <select
               id="new-deploy-conn"
               class="form-select"
@@ -146,7 +177,8 @@
               {:else}
                 {#each connections as c}
                   <option value={c.name}>
-                    {c.name} ({c.protocol === 'ftps_explicit' ? 'FTPS' : 'FTP'} • {c.host})
+                    {c.name} ({c.protocol === 'ftps_explicit' ? 'FTPS' : 'FTP'} •
+                    {c.host})
                   </option>
                 {/each}
               {/if}
@@ -158,26 +190,36 @@
       <!-- Section 2: Configuration Review -->
       {#if activeProject && activeConnection}
         <div class="deploy-flow-step">
-          <div class="step-label">2. Review Configuration</div>
+          <div class="step-label">Review configuration</div>
           <div class="config-review-card">
             <div class="config-item">
               <span class="config-k">Build Command</span>
-              <span class="config-v text-mono">{activeProject.buildCommand || '(no build command)'}</span>
+              <span class="config-v text-mono"
+                >{activeProject.buildCommand || '(no build command)'}</span
+              >
             </div>
             <div class="config-item">
               <span class="config-k">Source Artifacts</span>
-              <span class="config-v text-mono">{activeProject.outputRelPath || '.'}</span>
+              <span class="config-v text-mono"
+                >{activeProject.outputRelPath || '.'}</span
+              >
             </div>
             <div class="config-item">
               <span class="config-k">Remote Root</span>
-              <span class="config-v text-mono">{activeConnection.remoteRoot || '/'}</span>
+              <span class="config-v text-mono"
+                >{activeConnection.remoteRoot || '/'}</span
+              >
             </div>
             <div class="config-item">
               <span class="config-k">Security</span>
               <span class="config-v">
-                {activeConnection.protocol === 'ftps_explicit' ? 'FTPS Explicit (TLS 1.2+)' : 'Standard FTP'}
+                {activeConnection.protocol === 'ftps_explicit'
+                  ? 'FTPS Explicit (TLS 1.2+)'
+                  : 'Standard FTP'}
                 {#if activeConnection.tlsVerify}
-                  <span class="text-success text-xs font-semibold ml-1">✓ Verified</span>
+                  <span class="text-success text-xs font-semibold ml-1"
+                    >✓ Verified</span
+                  >
                 {/if}
               </span>
             </div>
@@ -186,77 +228,102 @@
       {/if}
 
       <!-- Section 3: IIS Maintenance Mode Option (Optional) -->
-      <div class="deploy-flow-step">
-        <div class="step-label">3. Optional IIS Quiescence</div>
-        <div class="offline-option-toggle">
-          <label class="form-check">
-            <input
-              type="checkbox"
-              bind:checked={enableIISOffline}
-              disabled={isSubmitting}
-            />
-            <span class="text-sm">
-              Enable IIS <code>app_offline.htm</code> quiescence during file swap
-            </span>
-          </label>
-        </div>
+      {#if activeProject?.projectType === 'dotnet'}
+        <details class="deploy-flow-step modal-optional-details">
+          <summary
+            >IIS maintenance mode <span class="text-muted">Optional</span
+            ></summary
+          >
 
-        {#if enableIISOffline}
-          <div class="offline-config-card mt-2">
-            <div class="form-group mb-2">
-              <label class="form-label" for="new-deploy-delay">
-                Quiescence Shutdown Delay (milliseconds)
-              </label>
+          <div class="offline-option-toggle">
+            <label class="form-check">
               <input
-                id="new-deploy-delay"
-                class="form-input"
-                type="number"
-                min="500"
-                step="500"
-                style="max-width: 160px;"
-                bind:value={iisShutdownDelay}
+                type="checkbox"
+                bind:checked={enableIISOffline}
                 disabled={isSubmitting}
               />
-              <p class="form-hint">Allows ASP.NET Core process time to release locked DLL handles.</p>
-            </div>
-            <div class="form-group mb-0">
-              <label class="form-label" for="new-deploy-banner">Maintenance HTML Banner</label>
-              <textarea
-                id="new-deploy-banner"
-                class="form-textarea text-xs"
-                rows="2"
-                bind:value={iisOfflineHtml}
-                disabled={isSubmitting}
-              ></textarea>
-            </div>
+              <span class="text-sm">
+                Enable IIS <code>app_offline.htm</code> quiescence during file swap
+              </span>
+            </label>
           </div>
-        {/if}
-      </div>
+
+          {#if enableIISOffline}
+            <div class="offline-config-card mt-2">
+              <div class="form-group mb-2">
+                <label class="form-label" for="new-deploy-delay">
+                  Quiescence Shutdown Delay (milliseconds)
+                </label>
+                <input
+                  id="new-deploy-delay"
+                  class="form-input"
+                  type="number"
+                  min="500"
+                  step="500"
+                  style="max-width: 160px;"
+                  bind:value={iisShutdownDelay}
+                  disabled={isSubmitting}
+                />
+                <p class="form-hint">
+                  Allows ASP.NET Core process time to release locked DLL
+                  handles.
+                </p>
+              </div>
+              <div class="form-group mb-0">
+                <label class="form-label" for="new-deploy-banner"
+                  >Maintenance HTML Banner</label
+                >
+                <textarea
+                  id="new-deploy-banner"
+                  class="form-textarea text-xs"
+                  rows="2"
+                  bind:value={iisOfflineHtml}
+                  disabled={isSubmitting}
+                ></textarea>
+              </div>
+            </div>
+          {/if}
+        </details>
+      {/if}
 
       <!-- Section 4: Safety Plan & Destructive Consequences -->
-      <div class="deploy-flow-step">
-        <div class="step-label">4. Execution Plan &amp; Safety Guarantees</div>
+      <details class="modal-optional-details">
+        <summary>How backups and verification work</summary>
         <div class="safety-notice-card">
           <ul class="safety-steps-list">
             <li>
               <span class="step-bullet">1</span>
-              <span><strong>Pre-flight Backup:</strong> Current remote files are downloaded to an isolated local snapshot directory before remote modification.</span>
+              <span
+                ><strong>Pre-flight Backup:</strong> Current remote files are downloaded
+                to an isolated local snapshot directory before remote modification.</span
+              >
             </li>
             <li>
               <span class="step-bullet">2</span>
-              <span><strong>Staging Upload:</strong> New artifacts are uploaded with unique temporary filenames (<code>.quickftp-*.tmp</code>).</span>
+              <span
+                ><strong>Staging Upload:</strong> New artifacts are uploaded
+                with unique temporary filenames (<code>.quickftp-*.tmp</code
+                >).</span
+              >
             </li>
             <li>
               <span class="step-bullet">3</span>
-              <span><strong>Digest Verification:</strong> SHA-256 digests are verified remotely before atomic promotion.</span>
+              <span
+                ><strong>Digest Verification:</strong> SHA-256 digests are verified
+                remotely before atomic promotion.</span
+              >
             </li>
             <li>
               <span class="step-bullet">4</span>
-              <span><strong>Controlled Pruning:</strong> Stale remote files not in the new build are removed only after their verified local backup is safely stored.</span>
+              <span
+                ><strong>Controlled Pruning:</strong> Stale remote files not in the
+                new build are removed only after their verified local backup is safely
+                stored.</span
+              >
             </li>
           </ul>
         </div>
-      </div>
+      </details>
     </div>
 
     <div class="modal-footer">
@@ -271,7 +338,10 @@
       <button
         class="btn btn-primary"
         on:click={handleStart}
-        disabled={isSubmitting || !selectedProject || !selectedConnection || $deployStatus === 'running'}
+        disabled={isSubmitting ||
+          !selectedProject ||
+          !selectedConnection ||
+          $deployStatus === 'running'}
       >
         {#if isSubmitting}
           <Icon name="loader" size={14} spin={true} />
@@ -289,6 +359,22 @@
   .new-deploy-modal {
     max-width: 540px;
     width: 95%;
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100dvh - 48px);
+    overflow: hidden;
+  }
+
+  .modal-header,
+  .modal-footer {
+    flex-shrink: 0;
+  }
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 14px 20px;
+    border-top: 1px solid var(--color-border);
   }
 
   .modal-title-wrap {
@@ -306,7 +392,8 @@
 
   .new-deploy-body {
     padding: 16px 20px;
-    max-height: 70vh;
+    min-height: 0;
+    flex: 1;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -411,4 +498,3 @@
     margin-top: 1px;
   }
 </style>
-

@@ -1,12 +1,15 @@
 <script lang="ts">
-  import { onMount, afterUpdate, createEventDispatcher } from 'svelte';
+  import { afterUpdate, createEventDispatcher } from 'svelte';
   import Icon from '../Icon.svelte';
+  import Pager from '../Pager.svelte';
+  import { pageItems } from '../../activityGroups';
   import { getFileIcon, getProjectIcon } from '../../icons';
   import type {
     DeploymentDTO,
     DeploymentFileDTO,
     ProjectDTO,
     ConnectionDTO,
+    DeployLog,
   } from '../../types';
   import {
     DEPLOYMENT_STAGES,
@@ -28,6 +31,8 @@
   } from '../../stores';
   import {
     getDeploymentFiles,
+    getDeploymentLogs,
+    clearDeploymentLogs,
     rollbackDeployment,
     cancelDeploy,
   } from '../../wailsjs';
@@ -46,7 +51,10 @@
   }>();
 
   let files: DeploymentFileDTO[] = [];
-  let loadingFiles = true;
+  let loadingFiles = false;
+  let filesLoaded = false;
+  let journalOpen = false;
+  let filePage = 0;
   let fileFilter: 'all' | 'upload' | 'backup' | 'delete' = 'all';
   let fileSearch = '';
 
@@ -59,6 +67,8 @@
     string,
     { start?: number; end?: number; duration?: number }
   > = {};
+
+  $: isCurrentRun = ($activeDeploymentId ?? 0) === deployment.id;
 
   $: isActiveRun =
     $deployStatus === 'running' && $activeDeploymentId === deployment.id;
@@ -113,11 +123,13 @@
 
   // Live progress line calculation
   $: latestTransferLine = isActiveRun
-    ? [...$deployLogs]
+    ? ([...$deployLogs]
         .reverse()
         .find((l) =>
-          /Uploading |Upload verified |Backup verified |Removing stale/.test(l.line)
-        )?.line ?? ''
+          /Uploading |Upload verified |Backup verified |Removing stale/.test(
+            l.line
+          )
+        )?.line ?? '')
     : '';
 
   $: transferProgress = (() => {
@@ -129,18 +141,61 @@
     const match = latestTransferLine.match(
       /\((\d+)\/(\d+),\s*(\d+)\/(\d+) bytes\)/
     );
-    return match ? `${formatBytes(Number(match[3]))} / ${formatBytes(Number(match[4]))}` : null;
+    return match
+      ? `${formatBytes(Number(match[3]))} / ${formatBytes(Number(match[4]))}`
+      : null;
   })();
 
+  let storedLogs: DeployLog[] = [];
+  let logPage = 0;
+  let logTotal = 0;
+  let logKey = '';
+  let logGeneration = 0;
+  let loadingLogs = false;
+  $: if (!isCurrentRun && deployment.id > 0) {
+    const key = `${deployment.id}:${logPage}`;
+    if (key !== logKey) {
+      logKey = key;
+      void loadLogs();
+    }
+  }
+  async function loadLogs() {
+    const generation = ++logGeneration;
+    loadingLogs = true;
+    try {
+      const result = await getDeploymentLogs(deployment.id, logPage * 50, 50);
+      if (generation === logGeneration) {
+        storedLogs = result.entries;
+        logTotal = result.total;
+      }
+    } catch (error: any) {
+      if (generation === logGeneration)
+        addToast('error', `Could not load run logs: ${error.message}`);
+    } finally {
+      if (generation === logGeneration) loadingLogs = false;
+    }
+  }
+  async function clearLogs() {
+    try {
+      if (deployment.id > 0) await clearDeploymentLogs(deployment.id);
+      if (isCurrentRun) deployLogs.set([]);
+      storedLogs = [];
+      logTotal = 0;
+      logPage = 0;
+      addToast(
+        'success',
+        'Text logs cleared; deployment journal and backups kept'
+      );
+    } catch (error: any) {
+      addToast('error', `Could not clear logs: ${error.message}`);
+    }
+  }
+  $: runLogs = isCurrentRun ? $deployLogs : storedLogs;
   // Filter logs for console
   $: filteredLogs = (() => {
-    if (!isActiveRun) {
-      // Historical run logs from file journal / error message
-      return [];
-    }
-    if (!activeStepFilter) return $deployLogs;
+    if (!activeStepFilter) return runLogs;
     const filterLower = activeStepFilter.toLowerCase();
-    return $deployLogs.filter((log) => {
+    return runLogs.filter((log) => {
       const l = log.line.toLowerCase();
       if (filterLower === 'build')
         return l.includes('build') || l.includes('dotnet') || l.includes('ng ');
@@ -162,11 +217,17 @@
       return (
         f.relativePath.toLowerCase().includes(q) ||
         f.status.toLowerCase().includes(q) ||
+        f.errorDetail?.toLowerCase().includes(q) ||
         (f.sha256Local && f.sha256Local.toLowerCase().includes(q))
       );
     }
     return true;
   });
+
+  $: filePage = Math.min(
+    filePage,
+    Math.max(0, Math.ceil(filteredFiles.length / 50) - 1)
+  );
 
   $: uploadCount = files.filter((f) => f.stage === 'upload').length;
   $: backupCount = files.filter((f) => f.stage === 'backup').length;
@@ -175,9 +236,14 @@
     .filter((f) => f.stage === 'upload')
     .reduce((sum, f) => sum + (f.sizeBytes || 0), 0);
 
-  onMount(async () => {
-    await loadFiles();
-  });
+  let previousRunStatus = deployment.status;
+  $: if (deployment.status !== previousRunStatus) {
+    previousRunStatus = deployment.status;
+    if (deployment.status !== 'running') {
+      filesLoaded = false;
+      if (journalOpen) void loadFiles();
+    }
+  }
 
   afterUpdate(() => {
     if (consoleEl && autoScroll && isActiveRun) {
@@ -186,10 +252,16 @@
   });
 
   async function loadFiles() {
+    if (deployment.id === 0) {
+      files = [];
+      loadingFiles = false;
+      return;
+    }
     loadingFiles = true;
     try {
       // Fetch all files across all stages for this deployment
       files = await getDeploymentFiles(deployment.id, '');
+      filesLoaded = true;
     } catch (err: any) {
       addToast('error', `Failed to load file journal: ${err.message}`);
     } finally {
@@ -209,7 +281,10 @@
     activeRollbackId = deployment.id;
     try {
       await rollbackDeployment(deployment.id, connName);
-      addToast('success', `Deployment #${deployment.id} successfully rolled back`);
+      addToast(
+        'success',
+        `Deployment #${deployment.id} successfully rolled back`
+      );
       dispatch('refresh');
     } catch (err: any) {
       failedRollbackIds.add(deployment.id);
@@ -266,7 +341,9 @@
         <span>Deployments</span>
       </button>
       <span class="nav-sep">/</span>
-      <span class="nav-current text-mono">Run #{deployment.id}</span>
+      <span class="nav-current text-mono"
+        >{deployment.id > 0 ? `Run #${deployment.id}` : 'New run'}</span
+      >
     </div>
 
     <div class="detail-title-row">
@@ -276,7 +353,11 @@
           <span>{status.label}</span>
         </span>
         <div class="title-text-group">
-          <h2>Deployment #{deployment.id}</h2>
+          <h2>
+            {deployment.id > 0
+              ? `Deployment #${deployment.id}`
+              : 'New Deployment'}
+          </h2>
           <div class="title-meta text-muted">
             <span class="meta-item">
               <Icon name={getProjectIcon(projType)} size={14} />
@@ -297,23 +378,28 @@
       <!-- Action Buttons -->
       <div class="detail-actions">
         <!-- New Deployment Using Same Config -->
-        <button
-          class="btn btn-secondary btn-sm"
-          on:click={() =>
-            dispatch('newDeployment', {
-              projectName: projName,
-              connectionName: connName,
-            })}
-          disabled={$deployStatus === 'running'}
-          title="Start a new deployment attempt with this configuration"
-        >
-          <Icon name="play" size={14} />
-          <span>Deploy Again</span>
-        </button>
+        {#if !isActiveRun}
+          <button
+            class="btn btn-secondary btn-sm"
+            on:click={() =>
+              dispatch('newDeployment', {
+                projectName: projName,
+                connectionName: connName,
+              })}
+            disabled={$deployStatus === 'running'}
+            title="Start a new deployment attempt with this configuration"
+          >
+            <Icon name="play" size={14} />
+            <span>Deploy Again</span>
+          </button>
+        {/if}
 
         <!-- Cancel (if running) -->
         {#if isActiveRun}
-          <button class="btn btn-secondary btn-sm text-danger" on:click={handleCancel}>
+          <button
+            class="btn btn-secondary btn-sm text-danger"
+            on:click={handleCancel}
+          >
             <Icon name="close" size={14} />
             <span>Cancel Run</span>
           </button>
@@ -327,67 +413,78 @@
             disabled={activeRollbackId === deployment.id}
             title="Restore remote files from backup snapshot"
           >
-            <Icon name="rollback" size={14} spin={activeRollbackId === deployment.id} />
-            <span>{activeRollbackId === deployment.id ? 'Rolling back...' : 'Roll Back Remote'}</span>
-          </button>
-        {/if}
-
-        {#if isActiveRun && filteredLogs.length > 0}
-          <button class="btn btn-secondary btn-sm" on:click={copyLogs} title="Copy logs to clipboard">
-            <Icon name="copy" size={14} />
-            <span>Copy Logs</span>
+            <Icon
+              name="rollback"
+              size={14}
+              spin={activeRollbackId === deployment.id}
+            />
+            <span
+              >{activeRollbackId === deployment.id
+                ? 'Rolling back...'
+                : 'Roll Back Remote'}</span
+            >
           </button>
         {/if}
       </div>
     </div>
 
     <!-- Configuration Snapshot Metadata Bar -->
-    <div class="snapshot-grid">
-      <div class="snapshot-item">
-        <span class="snapshot-k">Started</span>
-        <span class="snapshot-v">{formatDateTime(deployment.startedAt)}</span>
-      </div>
-      <div class="snapshot-item">
-        <span class="snapshot-k">Finished</span>
-        <span class="snapshot-v">
-          {deployment.finishedAt ? formatDateTime(deployment.finishedAt) : (isActiveRun ? 'In progress...' : 'Interrupted')}
-        </span>
-      </div>
-      <div class="snapshot-item">
-        <span class="snapshot-k">Duration</span>
-        <span class="snapshot-v text-mono">
-          {formatDuration(deployment.startedAt, deployment.finishedAt)}
-        </span>
-      </div>
-      <div class="snapshot-item">
-        <span class="snapshot-k">Build Command</span>
-        <span class="snapshot-v text-mono text-xs">{buildCommand || '—'}</span>
-      </div>
-      <div class="snapshot-item">
-        <span class="snapshot-k">Output Path</span>
-        <span class="snapshot-v text-mono text-xs">{outputRelPath}</span>
-      </div>
-      <div class="snapshot-item">
-        <span class="snapshot-k">Remote Root</span>
-        <span class="snapshot-v text-mono text-xs">{remoteRoot}</span>
-      </div>
-      {#if deployment.backupDir}
-        <div class="snapshot-item snapshot-col-span">
-          <span class="snapshot-k">Backup Snapshot Directory</span>
-          <div class="backup-path-row">
-            <span class="snapshot-v text-mono text-xs backup-path-text">{deployment.backupDir}</span>
-            <button
-              class="table-icon-action action-secondary"
-              on:click={copyBackupDir}
-              title="Copy backup path"
-              aria-label="Copy backup directory path"
-            >
-              <Icon name="copy" size={12} />
-            </button>
-          </div>
+    <details class="run-configuration">
+      <summary>Configuration &amp; backup details</summary>
+      <div class="snapshot-grid">
+        <div class="snapshot-item">
+          <span class="snapshot-k">Started</span>
+          <span class="snapshot-v">{formatDateTime(deployment.startedAt)}</span>
         </div>
-      {/if}
-    </div>
+        <div class="snapshot-item">
+          <span class="snapshot-k">Finished</span>
+          <span class="snapshot-v">
+            {deployment.finishedAt
+              ? formatDateTime(deployment.finishedAt)
+              : isActiveRun
+                ? 'In progress...'
+                : 'Interrupted'}
+          </span>
+        </div>
+        <div class="snapshot-item">
+          <span class="snapshot-k">Duration</span>
+          <span class="snapshot-v text-mono">
+            {formatDuration(deployment.startedAt, deployment.finishedAt)}
+          </span>
+        </div>
+        <div class="snapshot-item">
+          <span class="snapshot-k">Build Command</span>
+          <span class="snapshot-v text-mono text-xs">{buildCommand || '—'}</span
+          >
+        </div>
+        <div class="snapshot-item">
+          <span class="snapshot-k">Output Path</span>
+          <span class="snapshot-v text-mono text-xs">{outputRelPath}</span>
+        </div>
+        <div class="snapshot-item">
+          <span class="snapshot-k">Remote Root</span>
+          <span class="snapshot-v text-mono text-xs">{remoteRoot}</span>
+        </div>
+        {#if deployment.backupDir}
+          <div class="snapshot-item snapshot-col-span">
+            <span class="snapshot-k">Backup Snapshot Directory</span>
+            <div class="backup-path-row">
+              <span class="snapshot-v text-mono text-xs backup-path-text"
+                >{deployment.backupDir}</span
+              >
+              <button
+                class="table-icon-action action-secondary"
+                on:click={copyBackupDir}
+                title="Copy backup path"
+                aria-label="Copy backup directory path"
+              >
+                <Icon name="copy" size={12} />
+              </button>
+            </div>
+          </div>
+        {/if}
+      </div>
+    </details>
 
     <!-- Error Summary Banner (when failure or cancellation occurred) -->
     {#if deployment.errorMessage || status.key === 'rollback_failed'}
@@ -406,16 +503,20 @@
             {/if}
           </div>
           <div class="error-desc text-mono text-xs">
-            {deployment.errorMessage || 'Unknown error occurred during execution'}
+            {deployment.errorMessage ||
+              'Unknown error occurred during execution'}
           </div>
           {#if deployment.backupDir && status.key !== 'rolled_back'}
             {#if canRestore}
               <div class="error-advice text-xs mt-1">
-                Your remote files from before this run remain safely backed up in the snapshot directory above. You can trigger an explicit rollback to restore them.
+                Your remote files from before this run remain safely backed up
+                in the snapshot directory above. You can trigger an explicit
+                rollback to restore them.
               </div>
             {:else}
               <div class="error-advice text-xs mt-1 text-muted">
-                Restore is disabled for this run because subsequent deployments have already altered the remote target.
+                Restore is disabled for this run because subsequent deployments
+                have already altered the remote target.
               </div>
             {/if}
           {/if}
@@ -465,20 +566,32 @@
                 on:click={() =>
                   (activeStepFilter =
                     activeStepFilter === stage.key ? null : stage.key)}
-                title="Filter console logs to this stage"
+                title={isCurrentRun
+                  ? 'Filter console logs to this stage'
+                  : 'Show stage description'}
               >
                 <!-- Stage State Icon -->
                 <div class="stage-state-icon">
                   {#if stageState === 'completed'}
-                    <span class="state-icon-success"><Icon name="success" size={15} /></span>
+                    <span class="state-icon-success"
+                      ><Icon name="success" size={15} /></span
+                    >
                   {:else if stageState === 'failed'}
-                    <span class="state-icon-failure"><Icon name="error" size={15} /></span>
+                    <span class="state-icon-failure"
+                      ><Icon name="error" size={15} /></span
+                    >
                   {:else if stageState === 'cancelled'}
-                    <span class="state-icon-cancelled"><Icon name="warning" size={15} /></span>
+                    <span class="state-icon-cancelled"
+                      ><Icon name="warning" size={15} /></span
+                    >
                   {:else if stageState === 'running'}
-                    <span class="state-icon-running"><Icon name="loader" size={15} spin={true} /></span>
+                    <span class="state-icon-running"
+                      ><Icon name="loader" size={15} spin={true} /></span
+                    >
                   {:else}
-                    <span class="state-icon-pending"><Icon name="clock" size={14} /></span>
+                    <span class="state-icon-pending"
+                      ><Icon name="clock" size={14} /></span
+                    >
                   {/if}
                 </div>
 
@@ -488,16 +601,25 @@
                     <span class="stage-num">{idx + 1}.</span>
                     <span class="stage-label">{stage.label}</span>
                     {#if stage.isDestructive}
-                      <span class="destructive-tag" title="Destructive remote cleanup operation">prune</span>
+                      <span
+                        class="destructive-tag"
+                        title="Destructive remote cleanup operation">prune</span
+                      >
                     {/if}
                   </div>
-                  <div class="stage-desc text-muted">{stage.description}</div>
+                  {#if activeStepFilter === stage.key}<div
+                      class="stage-desc text-muted"
+                    >
+                      {stage.description}
+                    </div>{/if}
                 </div>
 
                 <!-- Stage Chevron -->
                 <div class="stage-arrow">
                   <Icon
-                    name={activeStepFilter === stage.key ? 'chevronDown' : 'chevronRight'}
+                    name={activeStepFilter === stage.key
+                      ? 'chevronDown'
+                      : 'chevronRight'}
                     size={12}
                   />
                 </div>
@@ -512,12 +634,17 @@
             <span class="live-pulse-dot"></span>
             <div class="live-progress-text">
               <span class="live-progress-label">Active Transfer</span>
-              <span class="live-progress-desc text-mono" title={latestTransferLine}>
+              <span
+                class="live-progress-desc text-mono"
+                title={latestTransferLine}
+              >
                 {latestTransferLine}
               </span>
               {#if transferProgress}
                 <div class="live-counts text-xs text-muted mt-1">
-                  Files: <b>{transferProgress.done} / {transferProgress.total}</b>
+                  Files: <b
+                    >{transferProgress.done} / {transferProgress.total}</b
+                  >
                   {#if byteProgress}
                     • {byteProgress}
                   {/if}
@@ -535,7 +662,10 @@
             <Icon name="fileCode" size={14} />
             <span>
               {#if activeStepFilter}
-                Filter: <b>{DEPLOYMENT_STAGES.find((s) => s.key === activeStepFilter)?.label || activeStepFilter}</b>
+                Filter: <b
+                  >{DEPLOYMENT_STAGES.find((s) => s.key === activeStepFilter)
+                    ?.label || activeStepFilter}</b
+                >
               {:else if isActiveRun}
                 Live Execution Console
               {:else}
@@ -555,7 +685,7 @@
               </button>
             {/if}
 
-            {#if isActiveRun}
+            {#if isCurrentRun}
               <span class="text-xs text-muted terminal-count">
                 {filteredLogs.length} lines
               </span>
@@ -565,6 +695,10 @@
               </label>
             {/if}
 
+            {#if filteredLogs.length > 0 || logTotal > 0}<button
+                class="btn btn-ghost btn-xs text-muted"
+                on:click={clearLogs}>Clear logs</button
+              >{/if}
             {#if filteredLogs.length > 0}
               <button
                 class="btn btn-ghost btn-xs text-muted"
@@ -579,7 +713,10 @@
 
         <!-- Console Body -->
         <div class="terminal-body" bind:this={consoleEl}>
-          {#if isActiveRun}
+          {#if loadingLogs}<div class="terminal-empty">
+              Loading this deployment’s saved logs…
+            </div>
+          {:else if isCurrentRun || logTotal > 0}
             {#if filteredLogs.length === 0}
               <div class="terminal-empty text-muted">
                 <Icon name="clock" size={24} />
@@ -644,191 +781,226 @@
                 </div>
               {/if}
               <div class="terminal-historical-note text-muted text-xs">
-                Detailed file-by-file outcomes and SHA-256 verification records are preserved in the Artifact Operations Journal below.
+                Detailed file-by-file outcomes and SHA-256 verification records
+                are preserved in the Artifact Operations Journal below.
               </div>
             </div>
           {/if}
         </div>
+        {#if !isCurrentRun}<Pager bind:page={logPage} total={logTotal} />{/if}
       </div>
     </div>
 
     <!-- Artifact Operations Journal Card -->
-    <div class="card journal-card mt-3">
-      <div class="card-header journal-header">
-        <div class="journal-header-left">
+    <details
+      class="card journal-card mt-3"
+      bind:open={journalOpen}
+      on:toggle={() => {
+        if (journalOpen && !filesLoaded && !loadingFiles) void loadFiles();
+      }}
+    >
+      <summary class="journal-disclosure">
+        <span class="journal-header-left">
           <Icon name="archive" size={15} />
-          <strong>Artifact Operations Journal</strong>
+          <strong>File operations</strong>
           <span class="journal-metrics-summary text-xs text-muted">
             {#if files.length > 0}
-              {uploadCount} uploaded ({formatBytes(totalUploadBytes)}) • {backupCount} backed up • {deleteCount} pruned
-            {:else}
-              No operations recorded
-            {/if}
+              {uploadCount} uploads ({formatBytes(totalUploadBytes)}) · {backupCount}
+              backups · {deleteCount} removed
+            {:else}{filesLoaded
+                ? 'No operations recorded'
+                : 'Open to load this run’s files'}{/if}
           </span>
-        </div>
-
-        <!-- Stage Filter Tabs & Search -->
-        <div class="journal-header-controls">
-          <div class="journal-tabs">
-            <button
-              class="journal-tab-btn"
-              class:is-active={fileFilter === 'all'}
-              on:click={() => (fileFilter = 'all')}
-            >
-              All ({files.length})
-            </button>
-            <button
-              class="journal-tab-btn"
-              class:is-active={fileFilter === 'upload'}
-              on:click={() => (fileFilter = 'upload')}
-            >
-              Uploads ({uploadCount})
-            </button>
-            <button
-              class="journal-tab-btn"
-              class:is-active={fileFilter === 'backup'}
-              on:click={() => (fileFilter = 'backup')}
-            >
-              Backups ({backupCount})
-            </button>
-            {#if deleteCount > 0}
+        </span>
+      </summary>
+      <div>
+        <div class="card-header journal-header">
+          <!-- Stage Filter Tabs & Search -->
+          <div class="journal-header-controls">
+            <div class="journal-tabs">
               <button
                 class="journal-tab-btn"
-                class:is-active={fileFilter === 'delete'}
-                on:click={() => (fileFilter = 'delete')}
+                class:is-active={fileFilter === 'all'}
+                on:click={() => {
+                  fileFilter = 'all';
+                  filePage = 0;
+                }}
               >
-                Pruned ({deleteCount})
+                All ({files.length})
               </button>
-            {/if}
-          </div>
+              <button
+                class="journal-tab-btn"
+                class:is-active={fileFilter === 'upload'}
+                on:click={() => {
+                  fileFilter = 'upload';
+                  filePage = 0;
+                }}
+              >
+                Uploads ({uploadCount})
+              </button>
+              <button
+                class="journal-tab-btn"
+                class:is-active={fileFilter === 'backup'}
+                on:click={() => {
+                  fileFilter = 'backup';
+                  filePage = 0;
+                }}
+              >
+                Backups ({backupCount})
+              </button>
+              {#if deleteCount > 0}
+                <button
+                  class="journal-tab-btn"
+                  class:is-active={fileFilter === 'delete'}
+                  on:click={() => {
+                    fileFilter = 'delete';
+                    filePage = 0;
+                  }}
+                >
+                  Pruned ({deleteCount})
+                </button>
+              {/if}
+            </div>
 
-          <div class="journal-search-wrap">
-            <Icon name="search" size={13} />
-            <input
-              class="form-input form-input-xs journal-search-input"
-              placeholder="Search file path or hash..."
-              bind:value={fileSearch}
-            />
+            <div class="journal-search-wrap">
+              <Icon name="search" size={13} />
+              <input
+                class="form-input form-input-xs journal-search-input"
+                placeholder="Search file path or hash..."
+                bind:value={fileSearch}
+                on:input={() => (filePage = 0)}
+              />
+            </div>
           </div>
         </div>
-      </div>
 
-      <!-- Journal Table -->
-      <div class="card-body" style="padding: 0;">
-        {#if loadingFiles}
-          <div class="journal-loading text-muted text-sm">
-            <Icon name="loader" size={16} spin={true} />
-            <span>Loading artifact journal...</span>
-          </div>
-        {:else if files.length === 0}
-          <div class="journal-empty text-muted text-sm">
-            No journaled artifact operations recorded for this deployment.
-          </div>
-        {:else if filteredFiles.length === 0}
-          <div class="journal-empty text-muted text-sm">
-            No files match the selected filter.
-          </div>
-        {:else}
-          <div class="table-wrap journal-table-wrap">
-            <table class="journal-table">
-              <thead>
-                <tr>
-                  <th style="width: 100px;">Stage</th>
-                  <th>Remote Path</th>
-                  <th style="width: 100px;">Size</th>
-                  <th style="width: 170px;">Verification</th>
-                  <th style="width: 150px;">SHA-256 Digest</th>
-                  <th>Outcome / Detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each filteredFiles as f (f.id)}
+        <!-- Journal Table -->
+        <div class="card-body" style="padding: 0;">
+          {#if loadingFiles}
+            <div class="journal-loading text-muted text-sm">
+              <Icon name="loader" size={16} spin={true} />
+              <span>Loading artifact journal...</span>
+            </div>
+          {:else if files.length === 0}
+            <div class="journal-empty text-muted text-sm">
+              No journaled artifact operations recorded for this deployment.
+            </div>
+          {:else if filteredFiles.length === 0}
+            <div class="journal-empty text-muted text-sm">
+              No files match the selected filter.
+            </div>
+          {:else}
+            <div class="table-wrap journal-table-wrap">
+              <table class="journal-table">
+                <thead>
                   <tr>
-                    <!-- Stage -->
-                    <td>
-                      <span
-                        class="badge text-xs"
-                        class:badge-info={f.stage === 'upload'}
-                        class:badge-gray={f.stage === 'backup'}
-                        class:badge-warning={f.stage === 'delete'}
-                      >
-                        <Icon
-                          name={f.stage === 'upload'
-                            ? 'upload'
-                            : f.stage === 'backup'
-                              ? 'archive'
-                              : 'trash'}
-                          size={11}
-                        />
-                        <span>{f.stage}</span>
-                      </span>
-                    </td>
-
-                    <!-- Remote Path -->
-                    <td class="text-mono text-xs">
-                      <span class="file-icon mr-1">
-                        <Icon name={getFileIcon(f.relativePath, false)} size={13} />
-                      </span>
-                      <span>{f.relativePath}</span>
-                    </td>
-
-                    <!-- Size -->
-                    <td class="text-mono text-xs text-muted">
-                      {formatBytes(f.sizeBytes)}
-                    </td>
-
-                    <!-- Verification Status -->
-                    <td>
-                      {#if f.status === 'verified'}
-                        <span class="badge badge-success text-xs">
-                          <Icon name="check" size={11} />
-                          <span>SHA-256 verified</span>
-                        </span>
-                      {:else if f.status === 'completed'}
-                        <span class="badge badge-info text-xs">
-                          <Icon name="check" size={11} />
-                          <span>Size verified</span>
-                        </span>
-                      {:else if f.status === 'failed'}
-                        <span class="badge badge-danger text-xs">
-                          <Icon name="error" size={11} />
-                          <span>Failed</span>
-                        </span>
-                      {:else}
-                        <span class="badge badge-gray text-xs">
-                          <Icon name="clock" size={11} />
-                          <span>{f.status}</span>
-                        </span>
-                      {/if}
-                    </td>
-
-                    <!-- SHA-256 Digest -->
-                    <td class="text-mono text-xs text-muted" title={f.sha256Local || ''}>
-                      {#if f.sha256Local}
-                        {formatChecksum(f.sha256Local)}
-                      {:else}
-                        —
-                      {/if}
-                    </td>
-
-                    <!-- Outcome / Error Detail -->
-                    <td class="text-xs">
-                      {#if f.errorDetail}
-                        <span class="text-danger font-medium">{f.errorDetail}</span>
-                      {:else if f.status === 'verified' || f.status === 'completed'}
-                        <span class="text-muted">Atomic promote complete</span>
-                      {:else}
-                        <span class="text-muted">—</span>
-                      {/if}
-                    </td>
+                    <th style="width: 100px;">Stage</th>
+                    <th>Remote Path</th>
+                    <th style="width: 100px;">Size</th>
+                    <th style="width: 170px;">Verification</th>
+                    <th style="width: 150px;">SHA-256 Digest</th>
+                    <th>Outcome / Detail</th>
                   </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
+                </thead>
+                <tbody>
+                  {#each pageItems(filteredFiles, filePage) as f (f.id)}
+                    <tr>
+                      <!-- Stage -->
+                      <td>
+                        <span
+                          class="badge text-xs"
+                          class:badge-info={f.stage === 'upload'}
+                          class:badge-gray={f.stage === 'backup'}
+                          class:badge-warning={f.stage === 'delete'}
+                        >
+                          <Icon
+                            name={f.stage === 'upload'
+                              ? 'upload'
+                              : f.stage === 'backup'
+                                ? 'archive'
+                                : 'trash'}
+                            size={11}
+                          />
+                          <span>{f.stage}</span>
+                        </span>
+                      </td>
+
+                      <!-- Remote Path -->
+                      <td class="text-mono text-xs">
+                        <span class="file-icon mr-1">
+                          <Icon
+                            name={getFileIcon(f.relativePath, false)}
+                            size={13}
+                          />
+                        </span>
+                        <span>{f.relativePath}</span>
+                      </td>
+
+                      <!-- Size -->
+                      <td class="text-mono text-xs text-muted">
+                        {formatBytes(f.sizeBytes)}
+                      </td>
+
+                      <!-- Verification Status -->
+                      <td>
+                        {#if f.status === 'verified'}
+                          <span class="badge badge-success text-xs">
+                            <Icon name="check" size={11} />
+                            <span>SHA-256 verified</span>
+                          </span>
+                        {:else if f.status === 'completed'}
+                          <span class="badge badge-info text-xs">
+                            <Icon name="check" size={11} />
+                            <span>Size verified</span>
+                          </span>
+                        {:else if f.status === 'failed'}
+                          <span class="badge badge-danger text-xs">
+                            <Icon name="error" size={11} />
+                            <span>Failed</span>
+                          </span>
+                        {:else}
+                          <span class="badge badge-gray text-xs">
+                            <Icon name="clock" size={11} />
+                            <span>{f.status}</span>
+                          </span>
+                        {/if}
+                      </td>
+
+                      <!-- SHA-256 Digest -->
+                      <td
+                        class="text-mono text-xs text-muted"
+                        title={f.sha256Local || ''}
+                      >
+                        {#if f.sha256Local}
+                          {formatChecksum(f.sha256Local)}
+                        {:else}
+                          —
+                        {/if}
+                      </td>
+
+                      <!-- Outcome / Error Detail -->
+                      <td class="text-xs">
+                        {#if f.errorDetail}
+                          <span class="text-danger font-medium"
+                            >{f.errorDetail}</span
+                          >
+                        {:else if f.status === 'verified' || f.status === 'completed'}
+                          <span class="text-muted">Atomic promote complete</span
+                          >
+                        {:else}
+                          <span class="text-muted">—</span>
+                        {/if}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </div>
+        <Pager bind:page={filePage} total={filteredFiles.length} />
       </div>
-    </div>
+    </details>
   </div>
 </div>
 
@@ -1283,7 +1455,6 @@
 
   .line-num {
     color: #475569;
-    user-select: none;
     text-align: right;
     min-width: 32px;
     margin-right: 14px;
@@ -1422,8 +1593,16 @@
     }
 
     .terminal-card {
+      grid-row: 1;
+      min-height: 280px;
       max-height: 400px;
+    }
+    .stages-card {
+      grid-row: 2;
+    }
+    .stages-list {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
     }
   }
 </style>
-
