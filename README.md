@@ -127,25 +127,35 @@ Navigate to the **Projects** tab:
 - **Type**: Select **Angular** or **.NET**.
 - **Local Path**: Absolute path to your local project repository.
 - **Build Command**: The build script executed before artifact collection (e.g. `npm run build` or `dotnet publish -c Release`). Leave blank if you build manually.
-- **Output Rel Path**: Path relative to the project root containing the compiled distribution files (e.g. `dist/my-app` or `bin/Release/net8.0/publish`).
+- **Output Rel Path**: Path relative to the project root containing the compiled distribution files (e.g. `dist/my-app`). For .NET, use `auto` with `dotnet publish -c Release`: QuickFTP detects the declared target framework and can select a single web application one folder below a solution root. Conventional framework paths are adjusted for that command. Custom commands, inherited/conditional target frameworks, and ambiguous or multi-target projects need explicit configuration. Detection is logged and does not rewrite saved profiles.
 - **Artifact Rules (Optional JSON)**: Define include and exclude glob patterns:
   ```json
   {
-    "include": ["*"],
+    "include": [],
     "exclude": ["*.map", "appsettings.Development.json"]
   }
   ```
 
+Use **Projects → project → Deployments → run** for saved build/transfer logs and that run’s file journal. Deployment records are created before building, so build failures also retain a run ID and diagnostics. Historical text logs are paginated and can be cleared per run or all at once; clearing text logs does not remove deployment records, rollback journals, or backups.
+
+Manual file operations follow **Connections → connection → Transfers → batch → files**. Activity is a shortcut to this connection-scoped history and the application log. **Clear finished transfer history** removes only terminal entries for the selected connection (or all connections from the overview), preserving queued, running, and conflict-waiting work. Older records without batch IDs remain in recovered groups. File details and journals load on demand in pages of 50.
+
+For a first .NET deployment, leave include patterns empty to publish the complete output directory, including dependencies, `.deps.json`, `.runtimeconfig.json`, native runtime assets, and generated `web.config`. Include/exclude rules are optional restrictions, not a required list of DLLs.
+
+Directory uploads validate files first, persist queue admission once, emit one queue-update event, and use a bounded number of workers. Manual upload verification uses FTP SIZE when supported, with listing fallback; deployment SHA-256 verification remains unchanged.
+
 ### 3. Running a Deployment
-1. Open the **Deploy** tab.
+1. Open **Projects**, choose a project, and click **Deploy** (or **New Deployment** in that project’s history).
 2. Select your configured **Project** and **Target Connection**.
 3. *(Optional)* Check **Enable IIS app_offline.htm handling** if deploying an ASP.NET Core application to IIS to release file locks.
 4. Click **Start Safe Deployment**.
 5. Watch live progress in the **Execution Pipeline** and the streaming **Output Console**.
-6. If an error occurs at any point, a **Rollback** button will appear allowing you to restore the previous remote state.
+6. Eligible failed deployments offer **Rollback** when a verified snapshot is available. Build-only failures have no remote changes to restore.
+
+Transient staging upload failures (including FTP 426) are checked against the remote SHA-256 before recovery. A complete staging file is accepted; a confirmed missing or mismatched staging file permits up to three upload attempts. If remote verification cannot establish the outcome, deployment stops and reports both errors. Live targets are promoted only after staging verification.
 
 ### 4. Viewing History & Rollback
-The **History** tab contains an audit log of all deployments:
+Each project’s **Deployments** view contains its execution history:
 - Click any row to expand the journal showing individual files backed up and uploaded.
 - Trigger explicit rollbacks for any failed or interrupted deployments.
 
