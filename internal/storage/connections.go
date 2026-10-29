@@ -94,3 +94,9 @@ func (db *DB) GetConnectionByName(name string) (*Connection, error) {
 	c.TLSVerify = tlsVerifyInt == 1
 	return &c, nil
 }
+
+// UpdateConnection preserves the profile ID and its deployment history on rename.
+func (db *DB) UpdateConnection(c *Connection) error {
+	return db.Conn.QueryRow(`UPDATE connections SET name=?, host=?, port=?, protocol=?, username=?, remote_root=?, tls_verify=?, cred_target_key=? WHERE id=? RETURNING created_at`,
+		c.Name, c.Host, c.Port, string(c.Protocol), c.Username, c.RemoteRoot, c.TLSVerify, c.CredTargetKey, c.ID).Scan(&c.CreatedAt)
+}

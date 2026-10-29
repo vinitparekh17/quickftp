@@ -137,3 +137,27 @@ func TestStorageListAndCRUD(t *testing.T) {
 		t.Fatalf("expected 3 allFiles, got %d", len(allFiles))
 	}
 }
+
+func TestUpdateConnectionRenamePreservesIdentity(t *testing.T) {
+	db, err := OpenDB(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c := &Connection{Name: "old", Host: "example.com", Port: 21, Protocol: ProtocolFTPSExplicit, Username: "user", RemoteRoot: "/", TLSVerify: true, CredTargetKey: "QuickFTP/old"}
+	if err := db.UpsertConnection(c); err != nil {
+		t.Fatal(err)
+	}
+	id := c.ID
+	c.Name = "new"
+	if err := db.UpdateConnection(c); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.ListConnections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != id || rows[0].Name != "new" || rows[0].CredTargetKey != "QuickFTP/old" {
+		t.Fatalf("rename changed profile identity: %+v", rows)
+	}
+}
