@@ -86,8 +86,16 @@ func (db *DB) DeleteProject(id int64) error {
 }
 
 // ListDeployments returns all deployments regardless of status, newest first, up to limit rows.
-func (db *DB) ListDeployments(limit int) ([]Deployment, error) {
-	rows, err := db.Conn.Query(`SELECT id, project_id, connection_id, status, current_phase, backup_dir, error_message, started_at, finished_at FROM deployments ORDER BY id DESC LIMIT ?`, limit)
+func (db *DB) ListDeployments(limit int, projectIDs ...int64) ([]Deployment, error) {
+	query := `SELECT id, project_id, connection_id, status, current_phase, backup_dir, error_message, started_at, finished_at FROM deployments`
+	args := []any{}
+	if len(projectIDs) > 0 {
+		query += ` WHERE project_id=?`
+		args = append(args, projectIDs[0])
+	}
+	query += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.Conn.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -13,14 +13,15 @@ import (
 )
 
 type Service struct {
-	DB           *storage.DB
-	Credentials  creds.Store
-	BackupRoot   string
-	BuildLog     projecthandler.LogFunc
-	PhaseLog     func(string)
-	TransferLog  func(string, string)
-	Gate         *transfer.Gate
-	TransferFile func(deploymentID, connectionID int64, connectionName, remote, local string, total, bytes int64, status, detail string)
+	DB                *storage.DB
+	Credentials       creds.Store
+	BackupRoot        string
+	BuildLog          projecthandler.LogFunc
+	PhaseLog          func(string)
+	DeploymentStarted func(int64)
+	TransferLog       func(string, string)
+	Gate              *transfer.Gate
+	TransferFile      func(deploymentID, connectionID int64, connectionName, remote, local string, total, bytes int64, status, detail string)
 }
 
 type Options struct {
@@ -28,7 +29,7 @@ type Options struct {
 	IISShutdownDelay time.Duration
 }
 
-func (s *Service) DeployProject(ctx context.Context, projectName, connectionName string, opts Options) (int64, error) {
+func (s *Service) DeployProject(ctx context.Context, projectName, connectionName string, opts Options) (deploymentID int64, retErr error) {
 	if s == nil || s.DB == nil || s.Credentials == nil {
 		return 0, fmt.Errorf("deployment service requires database and credential store")
 	}
@@ -48,12 +49,34 @@ func (s *Service) DeployProject(ctx context.Context, projectName, connectionName
 	if err != nil {
 		return 0, err
 	}
+	backupRoot := s.BackupRoot
+	if backupRoot == "" {
+		paths, err := storage.InitAppPaths()
+		if err != nil {
+			return deploymentID, err
+		}
+		backupRoot = paths.BackupsDir
+	}
+	deploymentID, err = s.DB.StartDeployment(project.ID, connection.ID, "")
+	if err != nil {
+		return deploymentID, err
+	}
+	defer func() {
+		if retErr != nil {
+			_ = s.DB.FinishDeployment(deploymentID, "failed", retErr.Error())
+		}
+	}()
+	if s.DeploymentStarted != nil {
+		s.DeploymentStarted(deploymentID)
+	}
+	_ = s.DB.SetDeploymentPhase(deploymentID, "build")
+
 	if s.PhaseLog != nil {
 		s.PhaseLog("build")
 	}
 	artifacts, err := handler.Prepare(ctx, projecthandler.Project{Type: project.Type, LocalPath: project.LocalPath, BuildCommand: project.BuildCommand, OutputRelPath: project.OutputRelPath, ArtifactRulesJSON: project.ArtifactRulesJSON}, s.BuildLog)
 	if err != nil {
-		return 0, err
+		return deploymentID, err
 	}
 	selected := make([]transfer.Artifact, len(artifacts))
 	for i, a := range artifacts {
@@ -64,16 +87,9 @@ func (s *Service) DeployProject(ctx context.Context, projectName, connectionName
 	if s.PhaseLog != nil {
 		s.PhaseLog("planning")
 	}
-	backupRoot := s.BackupRoot
-	if backupRoot == "" {
-		paths, err := storage.InitAppPaths()
-		if err != nil {
-			return 0, err
-		}
-		backupRoot = paths.BackupsDir
-	}
-	engine := transfer.Engine{DB: s.DB, Client: client, RemoteRoot: connection.RemoteRoot, BackupRoot: backupRoot, IISOfflinePage: opts.IISOfflinePage, IISShutdownDelay: opts.IISShutdownDelay, OnPhase: s.PhaseLog, OnLog: s.TransferLog, Gate: s.Gate, ConnectionID: connection.ID, ConnectionName: connection.Name, OnFileTransfer: s.TransferFile}
-	return engine.Deploy(ctx, project.ID, connection.ID, selected)
+	engine := transfer.Engine{DB: s.DB, StartedDeploymentID: deploymentID, Client: client, RemoteRoot: connection.RemoteRoot, BackupRoot: backupRoot, IISOfflinePage: opts.IISOfflinePage, IISShutdownDelay: opts.IISShutdownDelay, OnPhase: s.PhaseLog, OnLog: s.TransferLog, Gate: s.Gate, ConnectionID: connection.ID, ConnectionName: connection.Name, OnFileTransfer: s.TransferFile}
+	_, err = engine.Deploy(ctx, project.ID, connection.ID, selected)
+	return deploymentID, err
 }
 
 func (s *Service) Rollback(ctx context.Context, deploymentID int64, connectionName string) error {

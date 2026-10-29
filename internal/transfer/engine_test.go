@@ -91,6 +91,14 @@ func testEngine(t *testing.T, remote map[string][]byte) (*Engine, *memoryFTP, in
 
 func TestDeployBacksUpBeforeReplacingAndRemovesStaleFiles(t *testing.T) {
 	engine, ftp, project, connection := testEngine(t, map[string][]byte{"/site/index.html": []byte("old"), "/site/obsolete.js": []byte("stale")})
+	var reportedID int64
+	engine.OnStarted = func(id int64) {
+		reportedID = id
+		if _, err := engine.DB.GetDeployment(id); err != nil {
+			t.Errorf("run ID announced before persistence: %v", err)
+		}
+	}
+
 	local := filepath.Join(t.TempDir(), "index.html")
 	if err := os.WriteFile(local, []byte("new"), 0600); err != nil {
 		t.Fatal(err)
@@ -99,6 +107,10 @@ func TestDeployBacksUpBeforeReplacingAndRemovesStaleFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if reportedID != id {
+		t.Fatalf("announced run %d, deployed run %d", reportedID, id)
+	}
+
 	if id == 0 {
 		t.Fatal("expected deployment id")
 	}

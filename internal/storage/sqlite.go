@@ -87,6 +87,14 @@ func (db *DB) migrate() error {
 		updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 
+ CREATE TABLE IF NOT EXISTS deployment_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  deployment_id INTEGER NOT NULL REFERENCES deployments(id) ON DELETE CASCADE,
+  stream TEXT NOT NULL,
+  line TEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+ );
+ CREATE INDEX IF NOT EXISTS idx_deployment_logs_run ON deployment_logs(deployment_id, id);
 	CREATE INDEX IF NOT EXISTS idx_deployment_files_deployment ON deployment_files(deployment_id);
 	`
 	_, err := db.Conn.Exec(schema)
