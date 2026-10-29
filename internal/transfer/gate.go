@@ -28,6 +28,9 @@ func (g *Gate) SetLimit(limit int) {
 func (g *Gate) Limit() int { g.mu.Lock(); defer g.mu.Unlock(); return g.limit }
 func (g *Gate) Acquire(ctx context.Context) (func(), error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		g.mu.Lock()
 		if g.active < g.limit {
 			g.active++
