@@ -39,7 +39,14 @@ func (Angular) Prepare(ctx context.Context, p Project, log LogFunc) ([]Artifact,
 	return prepare(ctx, p, log)
 }
 func (DotNet) Prepare(ctx context.Context, p Project, log LogFunc) ([]Artifact, error) {
-	return prepare(ctx, p, log)
+	if p.LocalPath == "" {
+		return nil, errors.New("project path is required")
+	}
+	resolved, err := resolveDotNet(p, log)
+	if err != nil {
+		return nil, err
+	}
+	return prepare(ctx, resolved, log)
 }
 
 type artifactRules struct {
@@ -82,7 +89,7 @@ func prepare(ctx context.Context, p Project, log LogFunc) ([]Artifact, error) {
 	}
 	info, err := os.Stat(output)
 	if err != nil {
-		return nil, fmt.Errorf("output directory: %w", err)
+		return nil, fmt.Errorf("publish/build output directory %s is unavailable: %w; check that the build command publishes to the configured output path relative to %s", output, err, root)
 	}
 	if !info.IsDir() {
 		return nil, errors.New("output path must be a directory")
