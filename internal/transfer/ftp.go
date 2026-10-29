@@ -8,12 +8,14 @@ import (
 	"io"
 	"net"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/jlaffaye/ftp"
 	"quickftp/internal/storage"
+
+	"github.com/jlaffaye/ftp"
 )
 
 // FTPConfig contains the connection profile and its separately retrieved secret.
@@ -26,13 +28,17 @@ type FTPConfig struct {
 	Timeout            time.Duration
 	CredentialKey      string
 	ReuseConnection    bool
+	ForceListHidden    bool
 }
+
 type FTPClient struct {
-	Config    FTPConfig
-	mu        sync.Mutex
-	conn      *ftp.ServerConn
-	idleTimer *time.Timer
-	knownDirs map[string]struct{}
+	Config         FTPConfig
+	mu             sync.Mutex
+	conn           *ftp.ServerConn
+	idleTimer      *time.Timer
+	idleGeneration uint64
+	session        *ftpSession
+	knownDirs      map[string]struct{}
 }
 
 func (c *FTPClient) dial(ctx context.Context) (*ftp.ServerConn, error) {
@@ -40,13 +46,36 @@ func (c *FTPClient) dial(ctx context.Context) (*ftp.ServerConn, error) {
 	if port == 0 {
 		port = 21
 	}
-	timeout := c.Config.Timeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
+	session := c.session
+	control := true
+	var tlsConfig *tls.Config
+	opts := []ftp.DialOption{
+		ftp.DialWithShutTimeout(5 * time.Second),
+		ftp.DialWithDialFunc(func(network, address string) (net.Conn, error) {
+			isControl := control
+			control = false
+			// Explicit FTPS upgrades its control socket in the library. Data sockets
+			// and implicit FTPS must be wrapped here when using a custom dialer.
+			var socketTLS *tls.Config
+			if !isControl || port == 990 {
+				socketTLS = tlsConfig
+			}
+			conn, err := session.dial(network, address, socketTLS)
+			if err == nil && !isControl && socketTLS != nil {
+				return &ftpTLSDataConn{Conn: conn.(*tls.Conn)}, nil
+			}
+			return conn, err
+		}),
 	}
-	opts := []ftp.DialOption{ftp.DialWithTimeout(timeout), ftp.DialWithContext(ctx), ftp.DialWithShutTimeout(5 * time.Second)}
+	if c.Config.ForceListHidden {
+		// Some servers advertise MLSD but return entries that its parser drops.
+		// For the shared file browser connection, request a traditional listing
+		// including hidden files so recursive deletes and walks work without
+		// opening a second fallback connection, while keeping deployments unchanged.
+		opts = append(opts, ftp.DialWithDisabledMLSD(true), ftp.DialWithForceListHidden(true))
+	}
 	if c.Config.Protocol == storage.ProtocolFTPSExplicit {
-		tlsConfig := &tls.Config{ServerName: c.Config.Host, MinVersion: tls.VersionTLS12, InsecureSkipVerify: !c.Config.TLSVerify}
+		tlsConfig = &tls.Config{ServerName: c.Config.Host, MinVersion: tls.VersionTLS12, ClientSessionCache: tls.NewLRUClientSessionCache(8), InsecureSkipVerify: !c.Config.TLSVerify}
 		if port == 990 {
 			opts = append(opts, ftp.DialWithTLS(tlsConfig))
 		} else {
@@ -56,9 +85,13 @@ func (c *FTPClient) dial(ctx context.Context) (*ftp.ServerConn, error) {
 		return nil, fmt.Errorf("unsupported protocol %q", c.Config.Protocol)
 	}
 
-	addr := fmt.Sprintf("%s:%d", c.Config.Host, port)
+	addr := net.JoinHostPort(c.Config.Host, strconv.Itoa(port))
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		control = true
 		conn, err := ftp.Dial(addr, opts...)
 		if err != nil {
 			lastErr = fmt.Errorf("FTP dial: %w", err)
@@ -70,22 +103,48 @@ func (c *FTPClient) dial(ctx context.Context) (*ftp.ServerConn, error) {
 			_ = conn.Quit()
 			lastErr = fmt.Errorf("FTP login: %w", loginErr)
 		}
-		if attempt < 2 && ctx.Err() == nil {
-			time.Sleep(time.Duration((attempt+1)*500) * time.Millisecond)
+		session.close()
+		if attempt < 2 {
+			if err := sleepWithContext(ctx, time.Duration((attempt+1)*500)*time.Millisecond); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return nil, lastErr
 }
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (c *FTPClient) with(ctx context.Context, fn func(*ftp.ServerConn) error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	c.idleGeneration++
 	if c.idleTimer != nil {
 		c.idleTimer.Stop()
 		c.idleTimer = nil
 	}
+
+	if c.session == nil {
+		timeout := c.Config.Timeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		c.session = &ftpSession{timeout: timeout, sockets: make(map[*ftpSocket]struct{})}
+	}
+	stop := c.session.begin(ctx)
+	defer stop()
 
 	conn := c.conn
 	if conn != nil {
@@ -97,6 +156,7 @@ func (c *FTPClient) with(ctx context.Context, fn func(*ftp.ServerConn) error) er
 	}
 	if conn == nil {
 		var err error
+		c.knownDirs = nil
 		conn, err = c.dial(ctx)
 		if err != nil {
 			return err
@@ -106,7 +166,11 @@ func (c *FTPClient) with(ctx context.Context, fn func(*ftp.ServerConn) error) er
 		}
 	}
 	opErr := fn(conn)
+	if ctx.Err() != nil {
+		opErr = ctx.Err()
+	}
 	if c.Config.ReuseConnection && opErr == nil {
+		c.closeWhenIdleLocked(30 * time.Second)
 		return nil
 	}
 	if c.Config.ReuseConnection {
@@ -119,15 +183,22 @@ func (c *FTPClient) with(ctx context.Context, fn func(*ftp.ServerConn) error) er
 	}
 	quitErr := conn.Quit()
 	if opErr != nil {
+		c.session.close()
 		return opErr
 	}
 	return quitErr
+}
+
+// Test authenticates using the same transport and cancellation rules as transfers.
+func (c *FTPClient) Test(ctx context.Context) error {
+	return c.with(ctx, func(*ftp.ServerConn) error { return nil })
 }
 
 // Close releases a connection retained when ReuseConnection is enabled.
 func (c *FTPClient) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.idleGeneration++
 	if c.idleTimer != nil {
 		c.idleTimer.Stop()
 		c.idleTimer = nil
@@ -137,7 +208,9 @@ func (c *FTPClient) Close() error {
 	}
 	conn := c.conn
 	c.conn = nil
-	return conn.Quit()
+	err := conn.Quit()
+	c.knownDirs = nil
+	return err
 }
 
 // CloseWhenIdle lets a batch of activities reuse one control connection even
@@ -146,11 +219,30 @@ func (c *FTPClient) Close() error {
 func (c *FTPClient) CloseWhenIdle(delay time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.closeWhenIdleLocked(delay)
+}
+
+func (c *FTPClient) closeWhenIdleLocked(delay time.Duration) {
+	c.idleGeneration++
 	if c.idleTimer != nil {
 		c.idleTimer.Stop()
 	}
-	c.idleTimer = time.AfterFunc(delay, func() { _ = c.Close() })
+	generation := c.idleGeneration
+	c.idleTimer = time.AfterFunc(delay, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if generation != c.idleGeneration {
+			return
+		}
+		c.idleTimer = nil
+		if c.conn != nil {
+			_ = c.conn.Quit()
+			c.conn = nil
+		}
+		c.knownDirs = nil
+	})
 }
+
 func (c *FTPClient) List(ctx context.Context, root string) ([]RemoteFile, error) {
 	var files []RemoteFile
 	err := c.withRead(ctx, func(conn *ftp.ServerConn) error {
@@ -174,6 +266,10 @@ func isConnectionEOF(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed)
 }
 
+func isUnsafeEntryName(name string) bool {
+	return name == "" || strings.ContainsAny(name, "/\\") || strings.ContainsRune(name, 0)
+}
+
 // ListDirectory lists a single directory and preserves only metadata supplied by the server.
 func (c *FTPClient) ListDirectory(ctx context.Context, dir string) ([]RemoteFile, error) {
 	var files []RemoteFile
@@ -187,7 +283,7 @@ func (c *FTPClient) ListDirectory(ctx context.Context, dir string) ([]RemoteFile
 			if entry.Name == "." || entry.Name == ".." {
 				continue
 			}
-			if strings.ContainsAny(entry.Name, "/\\") || strings.ContainsRune(entry.Name, 0) {
+			if isUnsafeEntryName(entry.Name) {
 				return fmt.Errorf("server returned unsafe directory entry")
 			}
 			remote := path.Join(dir, entry.Name)
@@ -201,8 +297,9 @@ func (c *FTPClient) ListDirectory(ctx context.Context, dir string) ([]RemoteFile
 		}
 		return nil
 	})
-	return files, err
+	return files, mapMissing(err)
 }
+
 func (c *FTPClient) walk(conn *ftp.ServerConn, dir string, depth int, out *[]RemoteFile) error {
 	if depth > 64 {
 		return fmt.Errorf("remote directory nesting exceeds 64 at %s", dir)
@@ -215,7 +312,7 @@ func (c *FTPClient) walk(conn *ftp.ServerConn, dir string, depth int, out *[]Rem
 		if e.Name == "." || e.Name == ".." {
 			continue
 		}
-		if strings.ContainsAny(e.Name, "/\\") || strings.ContainsRune(e.Name, 0) {
+		if isUnsafeEntryName(e.Name) {
 			return fmt.Errorf("server returned unsafe directory entry")
 		}
 		remote := path.Join(dir, e.Name)
@@ -234,21 +331,13 @@ func (c *FTPClient) walk(conn *ftp.ServerConn, dir string, depth int, out *[]Rem
 	}
 	return nil
 }
+
 func (c *FTPClient) Download(ctx context.Context, name string, w io.Writer) error {
 	return c.with(ctx, func(conn *ftp.ServerConn) error {
 		r, err := conn.Retr(name)
 		if err != nil {
 			return mapMissing(err)
 		}
-		stop := make(chan struct{})
-		defer close(stop)
-		go func() {
-			select {
-			case <-ctx.Done():
-				_ = r.Close()
-			case <-stop:
-			}
-		}()
 		_, copyErr := io.Copy(w, r)
 		closeErr := r.Close()
 		if ctx.Err() != nil {
@@ -260,6 +349,14 @@ func (c *FTPClient) Download(ctx context.Context, name string, w io.Writer) erro
 		return closeErr
 	})
 }
+
+// FileSize verifies a manual upload without retrieving a complete directory listing.
+func (c *FTPClient) FileSize(ctx context.Context, name string) (int64, error) {
+	var size int64
+	err := c.withRead(ctx, func(conn *ftp.ServerConn) error { var err error; size, err = conn.FileSize(name); return err })
+	return size, mapMissing(err)
+}
+
 func (c *FTPClient) Upload(ctx context.Context, name string, r io.Reader) error {
 	return c.with(ctx, func(conn *ftp.ServerConn) error {
 		parent := path.Dir(name)
@@ -292,8 +389,15 @@ func (c *FTPClient) ensureRemoteDirectory(conn *ftp.ServerConn, dir string) erro
 			continue
 		}
 		if err := conn.MakeDir(current); err != nil {
+			original, pwdErr := conn.CurrentDir()
+			if pwdErr != nil {
+				return pwdErr
+			}
 			if cdErr := conn.ChangeDir(current); cdErr != nil {
 				return fmt.Errorf("create remote directory %s: %w", current, err)
+			}
+			if err := conn.ChangeDir(original); err != nil {
+				return err
 			}
 		}
 		c.knownDirs[current] = struct{}{}
@@ -312,9 +416,26 @@ func (r contextReader) Read(p []byte) (int, error) {
 	}
 	return r.r.Read(p)
 }
+
 func (c *FTPClient) Rename(ctx context.Context, from, to string) error {
-	return c.with(ctx, func(conn *ftp.ServerConn) error { return conn.Rename(from, to) })
+	err := c.with(ctx, func(conn *ftp.ServerConn) error { return conn.Rename(from, to) })
+	if err == nil {
+		c.evictKnownDir(from)
+	}
+	return err
 }
+
+func (c *FTPClient) evictKnownDir(target string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	prefix := strings.TrimRight(target, "/") + "/"
+	for dir := range c.knownDirs {
+		if dir == target || strings.HasPrefix(dir, prefix) {
+			delete(c.knownDirs, dir)
+		}
+	}
+}
+
 func (c *FTPClient) Delete(ctx context.Context, name string) error {
 	deleteOnce := func() error {
 		return c.with(ctx, func(conn *ftp.ServerConn) error {
@@ -366,9 +487,10 @@ func (c *FTPClient) remoteFileExists(ctx context.Context, name string) (bool, er
 				return true, nil
 			}
 		}
-		// Ordinary names are visible in a directory listing, so their absence
-		// confirms the delete even on servers that do not support SIZE well.
-		if !strings.HasPrefix(path.Base(name), ".") {
+		// Ordinary names (and hidden names when ForceListHidden is enabled) are
+		// visible in a directory listing, so their absence confirms the delete
+		// even on servers that do not support SIZE well.
+		if c.Config.ForceListHidden || !strings.HasPrefix(path.Base(name), ".") {
 			return false, nil
 		}
 	}
@@ -391,36 +513,76 @@ func (c *FTPClient) remoteFileExists(ctx context.Context, name string) (bool, er
 
 // DeleteDirectory removes a remote directory recursively.
 func (c *FTPClient) DeleteDirectory(ctx context.Context, name string) error {
-	err := c.with(ctx, func(conn *ftp.ServerConn) error {
-		// If empty, RemoveDir succeeds immediately without directory listing
-		if rmdErr := conn.RemoveDir(name); rmdErr == nil {
-			return nil
-		}
-		// Manually walk and delete all children recursively with absolute paths
-		// (avoiding built-in RemoveDirRecur which calls ChangeDir and alters server CWD)
-		if walkErr := c.walkDelete(conn, name, 0); walkErr == nil {
-			return nil
-		} else {
-			return mapMissing(walkErr)
-		}
-	})
-	if err == nil {
-		c.mu.Lock()
-		for dir := range c.knownDirs {
-			if dir == name || strings.HasPrefix(dir, strings.TrimRight(name, "/")+"/") {
-				delete(c.knownDirs, dir)
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		err = c.with(ctx, func(conn *ftp.ServerConn) error {
+			// If empty, RemoveDir succeeds immediately without directory listing
+			if rmdErr := conn.RemoveDir(name); rmdErr == nil {
+				return nil
 			}
+			// Manually walk and delete all children recursively with absolute paths
+			// (avoiding built-in RemoveDirRecur which calls ChangeDir and alters server CWD)
+			if walkErr := c.walkDelete(ctx, conn, name, 0); walkErr == nil {
+				return nil
+			} else {
+				return mapMissing(walkErr)
+			}
+		})
+		if err == nil || errors.Is(err, ErrNotFound) {
+			c.evictKnownDir(name)
+			return nil
 		}
-		c.mu.Unlock()
+		if ctx.Err() != nil || (!isConnectionEOF(err) && !isTransientPassiveError(err)) || attempt == 2 {
+			break
+		}
+		if sleepErr := sleepWithContext(ctx, time.Duration((attempt+1)*250)*time.Millisecond); sleepErr != nil {
+			break
+		}
 	}
 	return err
 }
 
-func (c *FTPClient) walkDelete(conn *ftp.ServerConn, dir string, depth int) error {
+func (c *FTPClient) listForDelete(ctx context.Context, conn *ftp.ServerConn, dir string) ([]*ftp.Entry, error) {
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		entries, err := conn.List(dir)
+		if err == nil {
+			return entries, nil
+		}
+		lastErr = err
+		// Deep trees like node_modules open a passive data connection per folder
+		// and can briefly exhaust Docker/vsftpd passive ports (connectex / refused).
+		if !isTransientPassiveError(err) || attempt == 3 {
+			break
+		}
+		if err := sleepWithContext(ctx, time.Duration((attempt+1)*150)*time.Millisecond); err != nil {
+			return nil, lastErr
+		}
+	}
+	return nil, lastErr
+}
+
+func isTransientPassiveError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "connectex") ||
+		strings.Contains(s, "connection refused") ||
+		strings.Contains(s, "cannot assign requested address")
+}
+
+func (c *FTPClient) walkDelete(ctx context.Context, conn *ftp.ServerConn, dir string, depth int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if depth > 64 {
 		return fmt.Errorf("remote directory nesting exceeds 64 at %s", dir)
 	}
-	entries, err := conn.List(dir)
+	entries, err := c.listForDelete(ctx, conn, dir)
 	if err != nil {
 		return err
 	}
@@ -428,21 +590,47 @@ func (c *FTPClient) walkDelete(conn *ftp.ServerConn, dir string, depth int) erro
 		if e.Name == "." || e.Name == ".." {
 			continue
 		}
+		if isUnsafeEntryName(e.Name) {
+			return fmt.Errorf("server returned unsafe directory entry")
+		}
 		child := path.Join(dir, e.Name)
 		if e.Type == ftp.EntryTypeFolder {
-			if err := c.walkDelete(conn, child, depth+1); err != nil {
+			if err := c.walkDelete(ctx, conn, child, depth+1); err != nil {
 				return err
 			}
 		} else {
-			if err := conn.Delete(child); err != nil {
-				if rmdErr := conn.RemoveDir(child); rmdErr != nil {
+			if err := conn.Delete(child); err != nil && !errors.Is(mapMissing(err), ErrNotFound) {
+				if rmdErr := conn.RemoveDir(child); rmdErr != nil && !errors.Is(mapMissing(rmdErr), ErrNotFound) {
 					return err
 				}
 			}
 		}
 	}
-	return conn.RemoveDir(dir)
+	if err := conn.RemoveDir(dir); err != nil {
+		if errors.Is(mapMissing(err), ErrNotFound) {
+			return nil
+		}
+		// Some servers return only a generic 550 for a non-empty directory.
+		// Include the remaining entries so the UI log identifies what prevented
+		// removal (for example, a hidden file omitted by the first listing).
+		remaining, listErr := c.listForDelete(ctx, conn, dir)
+		if listErr != nil {
+			return fmt.Errorf("remove remote directory %s: %w (could not inspect remaining entries: %v)", dir, err, listErr)
+		}
+		var names []string
+		for _, entry := range remaining {
+			if entry.Name != "." && entry.Name != ".." {
+				names = append(names, entry.Name)
+			}
+		}
+		if len(names) > 0 {
+			return fmt.Errorf("remove remote directory %s: %w (remaining entries: %s)", dir, err, strings.Join(names, ", "))
+		}
+		return fmt.Errorf("remove remote directory %s: %w (server still reports the directory as non-empty, but its listing is empty)", dir, err)
+	}
+	return nil
 }
+
 func mapMissing(err error) error {
 	if err == nil {
 		return nil

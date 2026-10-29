@@ -88,12 +88,15 @@ func TestFTPDirectoryActivityIntegration(t *testing.T) {
 		}
 	}()
 	manager := OpenActivityManager(filepath.Join(t.TempDir(), "activity.json"), NewGate(2))
+	requests := make([]UploadRequest, 0, files)
 	for i := 0; i < files; i++ {
 		rel := filepath.Join(".git", "objects", fmt.Sprintf("%02x", i%16), fmt.Sprintf("%040x", i))
-		if _, err := manager.AddUpload(1, "integration", path.Join(remoteRoot, filepath.ToSlash(rel)), filepath.Join(local, rel), "Overwrite", client); err != nil {
-			t.Fatal(err)
-		}
+		requests = append(requests, UploadRequest{RemotePath: path.Join(remoteRoot, filepath.ToSlash(rel)), LocalPath: filepath.Join(local, rel)})
 	}
+	if _, err := manager.AddUploads(1, "integration", requests, "Overwrite", client, NewTransferBatch("integration folder")); err != nil {
+		t.Fatal(err)
+	}
+
 	browseDone := make(chan error, 1)
 	go func() {
 		for i := 0; i < 10; i++ {
@@ -182,4 +185,52 @@ func TestFTPDirectoryActivityIntegration(t *testing.T) {
 	}
 	cleanupRemote()
 	cleanupSafe = false
+}
+
+// Large payloads exercise TLS shutdown and record buffering that tiny probes miss.
+func TestFTPLargeUploadIntegration(t *testing.T) {
+	if os.Getenv("QUICKFTP_FTP_INTEGRATION") != "1" {
+		t.Skip("set QUICKFTP_FTP_INTEGRATION=1 for a controlled server")
+	}
+	port, err := strconv.Atoi(os.Getenv("QUICKFTP_FTP_PORT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &FTPClient{Config: FTPConfig{
+		Host: os.Getenv("QUICKFTP_FTP_HOST"), Port: port,
+		Protocol: storage.Protocol(os.Getenv("QUICKFTP_FTP_PROTOCOL")),
+		Username: os.Getenv("QUICKFTP_FTP_USERNAME"), Password: os.Getenv("QUICKFTP_FTP_PASSWORD"),
+		TLSVerify: os.Getenv("QUICKFTP_FTP_TLS_VERIFY") != "false", ReuseConnection: true,
+	}}
+	defer client.Close()
+	root := os.Getenv("QUICKFTP_FTP_REMOTE_ROOT")
+	if root == "" {
+		root = "/site/wwwroot"
+	}
+	remote := path.Join(root, fmt.Sprintf("quickftp-large-probe-%d.tmp", time.Now().UnixNano()))
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := client.Delete(ctx, remote); err != nil {
+			t.Errorf("cleanup large probe %s: %v", remote, err)
+		}
+	}()
+	payload := make([]byte, 8*1024*1024+37)
+	for i := range payload {
+		payload[i] = byte(i * 37)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := client.Upload(ctx, remote, bytes.NewReader(payload)); err != nil {
+			t.Fatalf("large protected upload %d: %v", attempt, err)
+		}
+		var downloaded bytes.Buffer
+		if err := client.Download(ctx, remote, &downloaded); err != nil {
+			t.Fatalf("verify large upload %d: %v", attempt, err)
+		}
+		if !bytes.Equal(downloaded.Bytes(), payload) {
+			t.Fatalf("large upload %d corrupted: received %d of %d bytes", attempt, downloaded.Len(), len(payload))
+		}
+	}
 }
