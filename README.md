@@ -245,3 +245,24 @@ quickftp/
 
 MIT
 
+
+### Export and import data
+
+In **Settings → Export & Import Data**, choose **Export Data** to save a versioned
+QuickFTP JSON backup containing all saved connections, projects (including build
+commands and artifact rules), and configuration. Save settings before exporting
+if you have edited preferences.
+
+Choose **Import Data**, confirm, and select a backup to restore it. Profiles are
+merged by name: existing connections and projects keep their IDs, history and
+credentials; matching names are skipped. Saved configuration is replaced and
+applied immediately. Invalid or unsupported backups are rejected before changes;
+profile inserts are transactional. Import is blocked during an active deployment.
+Files larger than 10 MiB are rejected.
+
+Passwords and credential-store keys are never exported or imported. Re-enter
+passwords for new connections, especially on another machine. Deployment history,
+remote/local files and deployment backup contents are excluded. Review imported
+local paths, collision policies and build commands before deploying; importing
+does not execute commands or contact FTP servers. The JSON includes server names,
+usernames and paths, so keep it private.
