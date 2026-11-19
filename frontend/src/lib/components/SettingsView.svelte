@@ -233,8 +233,7 @@
             </button>
           </div>
           <div class="form-hint">
-            Destination folder on your machine when downloading files from the
-            File Explorer.
+            Starting folder for the download picker in File Explorer.
           </div>
         </div>
       </div>
