@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"quickftp/internal/storage"
 )
 
 func TestGateLimitAppliesToNewWork(t *testing.T) {
@@ -37,33 +39,68 @@ func TestGateLimitAppliesToNewWork(t *testing.T) {
 	}
 }
 
-func TestActivityRecoveryMarksInterruptedAndIgnoresMalformed(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "transfers.json")
-	if err := os.WriteFile(p, []byte(`{"version":1,"entries":[{"id":"a","status":"Running","remotePath":"/safe/file","localPath":"C:/safe/file","direction":"Download"},{"id":"b","status":"Completed","remotePath":"/done","localPath":"C:/done"}]}`), 0600); err != nil {
-		t.Fatal(err)
+func openTestActivityManager(t testing.TB, legacyFile string, gate *Gate) *ActivityManager {
+	t.Helper()
+	if legacyFile == "" {
+		m, err := OpenActivityManager(nil, "", gate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(m.Close)
+		return m
 	}
-	m := OpenActivityManager(p, NewGate(2))
-	items := m.List()
-	if items[0].Status != "Interrupted" {
-		t.Fatalf("running transfer status = %s", items[0].Status)
-	}
-	if len(items) != 1 || items[0].ID != "a" {
-		t.Fatalf("session transfer history should not be restored: %#v", items)
-	}
-	data, err := os.ReadFile(p)
+	db, err := storage.OpenDB(legacyFile + ".db")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(data, []byte(`"Completed"`)) || bytes.Contains(data, []byte(`"Running"`)) {
-		t.Fatalf("recovery file contains non-recovery history: %s", data)
-	}
-	if err := os.WriteFile(p, []byte("partial json"), 0600); err != nil {
+	t.Cleanup(func() { _ = db.Close() })
+	m, err := OpenActivityManager(db.Conn, legacyFile, gate)
+	if err != nil {
 		t.Fatal(err)
 	}
-	m = OpenActivityManager(p, NewGate(2))
-	if len(m.List()) != 0 {
-		t.Fatal("malformed transfer history should be ignored")
+	t.Cleanup(m.Close)
+	return m
+}
+
+func TestActivityRecoveryMigratesLegacyOnce(t *testing.T) {
+	for _, legacyName := range []string{"transfer-recovery.json", "transfers.json"} {
+		t.Run(legacyName, func(t *testing.T) {
+			dir := t.TempDir()
+			legacy := filepath.Join(dir, legacyName)
+			configured := filepath.Join(dir, "transfer-recovery.json")
+			data := []byte(`{"version":1,"entries":[{"id":"a","status":"Running","direction":"Download"},{"id":"b","status":"Completed"},{"id":"c","status":"Waiting"}]}`)
+			if err := os.WriteFile(legacy, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			m := openTestActivityManager(t, configured, NewGate(2))
+			items := m.List()
+			if len(items) != 2 || items[0].ID != "a" || items[1].ID != "c" || items[0].Status != "Interrupted" || items[1].Status != "Interrupted" {
+				t.Fatalf("wrong migrated recovery rows: %+v", items)
+			}
+			if _, err := m.ClearHistory(0); err != nil {
+				t.Fatal(err)
+			}
+			m.Close()
+			reopened := openTestActivityManager(t, configured, NewGate(2))
+			if len(reopened.List()) != 0 {
+				t.Fatal("cleared transfers were imported again")
+			}
+			retained, err := os.ReadFile(legacy)
+			if err != nil || !bytes.Equal(retained, data) {
+				t.Fatalf("legacy file changed: %q, %v", retained, err)
+			}
+		})
+	}
+}
+
+func TestActivityRecoveryIgnoresMalformedLegacy(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "transfer-recovery.json")
+	if err := os.WriteFile(file, []byte("partial json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := openTestActivityManager(t, file, NewGate(2)).List(); len(got) != 0 {
+		t.Fatalf("malformed legacy file created recovery entries: %+v", got)
 	}
 }
 
@@ -143,7 +180,7 @@ func TestActivityDownloadPublishesVerifiedFile(t *testing.T) {
 	root := t.TempDir()
 	src := filepath.Join(root, "remote.txt")
 	client := &activityMock{files: map[string][]byte{"/root/remote.txt": []byte("verified")}}
-	m := OpenActivityManager(filepath.Join(root, "activity.json"), NewGate(2))
+	m := openTestActivityManager(t, filepath.Join(root, "activity.json"), NewGate(2))
 	job, e := m.AddDownload(1, "test", "/root/remote.txt", src, int64(len("verified")), "Ask", client)
 	if e != nil {
 		t.Fatal(e)
@@ -168,7 +205,7 @@ func TestActivityAskConflictPausesOnlyUntilResolved(t *testing.T) {
 		t.Fatal(e)
 	}
 	client := &activityMock{files: map[string][]byte{"/root/existing.txt": []byte("new")}}
-	m := OpenActivityManager(filepath.Join(root, "activity.json"), NewGate(2))
+	m := openTestActivityManager(t, filepath.Join(root, "activity.json"), NewGate(2))
 	job, e := m.AddDownload(1, "test", "/root/existing.txt", dest, 3, "Ask", client)
 	if e != nil {
 		t.Fatal(e)
@@ -191,7 +228,7 @@ func TestActivityUploadVerifiesRemoteSize(t *testing.T) {
 		t.Fatal(e)
 	}
 	client := &activityMock{files: map[string][]byte{}}
-	m := OpenActivityManager(filepath.Join(root, "activity.json"), NewGate(1))
+	m := openTestActivityManager(t, filepath.Join(root, "activity.json"), NewGate(1))
 	job, e := m.AddUpload(2, "test", "/root/upload.txt", src, "Ask", client)
 	if e != nil {
 		t.Fatal(e)
@@ -209,7 +246,7 @@ func TestCancelledDownloadRemovesPartial(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "partial.txt")
 	client := &activityMock{files: map[string][]byte{}, block: true, started: make(chan struct{})}
-	m := OpenActivityManager(filepath.Join(root, "activity.json"), NewGate(1))
+	m := openTestActivityManager(t, filepath.Join(root, "activity.json"), NewGate(1))
 	job, e := m.AddDownload(1, "test", "/root/partial.txt", dest, 10, "Ask", client)
 	if e != nil {
 		t.Fatal(e)
@@ -230,7 +267,7 @@ func TestCancelledDownloadRemovesPartial(t *testing.T) {
 
 func TestSkipDownloadOnlySkipsExistingDestination(t *testing.T) {
 	root := t.TempDir()
-	m := OpenActivityManager("", NewGate(1))
+	m := openTestActivityManager(t, "", NewGate(1))
 	defer m.Close()
 	client := &activityMock{files: map[string][]byte{"/new.txt": []byte("new")}}
 	job, err := m.AddDownload(1, "test", "/new.txt", filepath.Join(root, "new.txt"), 3, "Skip", client)
@@ -241,7 +278,7 @@ func TestSkipDownloadOnlySkipsExistingDestination(t *testing.T) {
 }
 
 func TestActivityCloseCancelsWorkersAndRejectsNewWork(t *testing.T) {
-	m := OpenActivityManager("", NewGate(1))
+	m := openTestActivityManager(t, "", NewGate(1))
 	client := &activityMock{block: true, started: make(chan struct{})}
 	local := filepath.Join(t.TempDir(), "download")
 	job, err := m.AddDownload(1, "test", "/file", local, 10, "Ask", client)
@@ -276,7 +313,7 @@ func TestCancelledContextCannotAcquireAvailableGate(t *testing.T) {
 
 func TestFailureHistoryAndBatchSurviveRestart(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "activity.json")
-	m := OpenActivityManager(file, NewGate(1))
+	m := openTestActivityManager(t, file, NewGate(1))
 	batch := NewTransferBatch("API publish folder")
 	job, err := m.AddDownload(1, "test", "/missing.dll", filepath.Join(t.TempDir(), "missing.dll"), 1, "Ask", &activityMock{files: map[string][]byte{}}, batch)
 	if err != nil {
@@ -284,14 +321,14 @@ func TestFailureHistoryAndBatchSurviveRestart(t *testing.T) {
 	}
 	failed := waitStatus(t, m, job.ID, "Failed")
 	m.Close()
-	restored := OpenActivityManager(file, NewGate(1)).List()
+	restored := openTestActivityManager(t, file, NewGate(1)).List()
 	if len(restored) != 1 || restored[0].Status != "Failed" || restored[0].Error != failed.Error || restored[0].BatchID != batch.ID || restored[0].BatchName != batch.Name {
 		t.Fatalf("failure or batch metadata lost on restart: %+v", restored)
 	}
 }
 
 func TestFailureHistoryIsNotPrunedWithCompletedRows(t *testing.T) {
-	m := OpenActivityManager("", NewGate(1))
+	m := openTestActivityManager(t, "", NewGate(1))
 	for i := 0; i < 3252; i++ {
 		m.entries = append(m.entries, Activity{ID: fmt.Sprint(i), Direction: "Upload", Status: "Failed", Error: "original diagnostic"})
 	}
@@ -309,7 +346,7 @@ func (c *blockedUploadClient) Upload(ctx context.Context, _ string, _ io.Reader)
 }
 
 func TestBulkUploadValidatesBeforeAdmission(t *testing.T) {
-	m := OpenActivityManager("", NewGate(1))
+	m := openTestActivityManager(t, "", NewGate(1))
 	defer m.Close()
 	file := filepath.Join(t.TempDir(), "good.txt")
 	if err := os.WriteFile(file, []byte("ok"), 0600); err != nil {
@@ -321,7 +358,7 @@ func TestBulkUploadValidatesBeforeAdmission(t *testing.T) {
 	}
 }
 func TestClearTransferHistoryKeepsActiveAndOtherConnections(t *testing.T) {
-	m := OpenActivityManager(filepath.Join(t.TempDir(), "activity.json"), NewGate(1))
+	m := openTestActivityManager(t, filepath.Join(t.TempDir(), "activity.json"), NewGate(1))
 	m.entries = []Activity{{ID: "failed", Direction: "Upload", ConnectionID: 1, Status: "Failed"}, {ID: "running", Direction: "Upload", ConnectionID: 1, Status: "Running"}, {ID: "waiting", Direction: "Download", ConnectionID: 1, Status: "Waiting"}, {ID: "other", Direction: "Upload", ConnectionID: 2, Status: "Interrupted"}, {ID: "deployment", Direction: "Deployment upload", ConnectionID: 1, Status: "Failed"}}
 	removed, err := m.ClearHistory(1)
 	if err != nil {
@@ -348,7 +385,7 @@ func (c *sizedActivityClient) FileSize(_ context.Context, name string) (int64, e
 	return int64(len(c.files[name])), nil
 }
 func TestUploadVerifiesWithSizeWithoutSecondDirectoryListing(t *testing.T) {
-	m := OpenActivityManager("", NewGate(1))
+	m := openTestActivityManager(t, "", NewGate(1))
 	defer m.Close()
 	file := filepath.Join(t.TempDir(), "payload")
 	if err := os.WriteFile(file, []byte("payload"), 0600); err != nil {
@@ -379,11 +416,13 @@ func BenchmarkDirectoryQueue(b *testing.B) {
 				if err := os.WriteFile(file, []byte("test"), 0600); err != nil {
 					b.Fatal(err)
 				}
-				m := OpenActivityManager(filepath.Join(dir, "recovery.json"), NewGate(1))
+				m := openTestActivityManager(b, filepath.Join(dir, "recovery.json"), NewGate(1))
 				for i := 0; i < 3252; i++ {
 					m.entries = append(m.entries, Activity{ID: fmt.Sprint(i), ConnectionID: 2, Direction: "Upload", Status: "Interrupted", RemotePath: fmt.Sprintf("/site/nested/file-%d.dll", i), LocalPath: "C:/old/publish/nested/file.dll", Error: "original saved diagnostic"})
 				}
-				m.persistLocked()
+				if err := m.saveRecoveryEntries(m.entries); err != nil {
+					b.Fatal(err)
+				}
 				requests := make([]UploadRequest, 100)
 				for i := range requests {
 					requests[i] = UploadRequest{RemotePath: fmt.Sprintf("/file-%d", i), LocalPath: file}
@@ -411,12 +450,10 @@ func BenchmarkDirectoryQueue(b *testing.B) {
 
 func TestBulkUploadDoesNotStartIfRecoveryQueueCannotBeSaved(t *testing.T) {
 	dir := t.TempDir()
-	blocker := filepath.Join(dir, "not-a-directory")
-	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
+	m := openTestActivityManager(t, filepath.Join(dir, "queue.json"), NewGate(1))
+	if err := m.recoveryDB.Close(); err != nil {
 		t.Fatal(err)
 	}
-	m := OpenActivityManager(filepath.Join(blocker, "queue.json"), NewGate(1))
-	defer m.Close()
 	file := filepath.Join(dir, "payload")
 	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
 		t.Fatal(err)
@@ -442,7 +479,7 @@ func TestDownloadRechecksDestinationAfterWaiting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := OpenActivityManager(filepath.Join(dir, "activity.json"), gate)
+	m := openTestActivityManager(t, filepath.Join(dir, "activity.json"), gate)
 	defer m.Close()
 	defer release()
 	client := &activityMock{files: map[string][]byte{"/file.txt": []byte("new")}}
@@ -465,7 +502,7 @@ func TestDownloadRechecksDestinationAfterWaiting(t *testing.T) {
 
 func TestDownloadWorkersLeaveRoomForWorkBehindConflicts(t *testing.T) {
 	dir := t.TempDir()
-	m := OpenActivityManager(filepath.Join(dir, "queue.json"), NewGate(1))
+	m := openTestActivityManager(t, filepath.Join(dir, "queue.json"), NewGate(1))
 	defer m.Close()
 	client := &activityMock{files: map[string][]byte{"/file.txt": []byte("new")}}
 	var requests []DownloadRequest
@@ -503,7 +540,7 @@ func TestDownloadWorkerLimitAndQueuedCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	m := OpenActivityManager(filepath.Join(dir, "queue.json"), gate)
+	m := openTestActivityManager(t, filepath.Join(dir, "queue.json"), gate)
 	defer m.Close()
 	client := &activityMock{files: map[string][]byte{"/file.txt": []byte("new")}}
 	var requests []DownloadRequest
@@ -559,5 +596,45 @@ func TestProgressCountersThrottleLargeChunks(t *testing.T) {
 				t.Fatalf("progress was not delivered after the throttle window: total %d, reported %d, error %v", total, reported, err)
 			}
 		})
+	}
+}
+
+func TestTransferRecoveryWritesOnlyChangedRows(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "queue.json")
+	m := openTestActivityManager(t, file, NewGate(1))
+	untouched := Activity{ID: "other", Status: "Failed", Direction: "Upload", Error: "saved failure"}
+	if err := m.saveRecoveryEntries([]Activity{untouched}); err != nil {
+		t.Fatal(err)
+	}
+	m.entries = append(m.entries, untouched)
+	if _, err := m.recoveryDB.Exec(`
+		CREATE TABLE observed_writes (id TEXT, operation TEXT);
+		CREATE TRIGGER observe_queue_update AFTER UPDATE ON transfer_recovery
+		BEGIN INSERT INTO observed_writes VALUES (old.id, 'update'); END;
+		CREATE TRIGGER observe_queue_delete AFTER DELETE ON transfer_recovery
+		BEGIN INSERT INTO observed_writes VALUES (old.id, 'delete'); END;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	client := &activityMock{files: map[string][]byte{"/file.txt": []byte("new")}}
+	job, err := m.AddDownload(1, "test", "/file.txt", filepath.Join(dir, "download.txt"), 3, "Skip", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, m, job.ID, "Completed")
+	var touched, updates, deletes int
+	err = m.recoveryDB.QueryRow(`SELECT
+		COUNT(CASE WHEN id <> ? THEN 1 END),
+		COUNT(CASE WHEN operation = 'update' THEN 1 END),
+		COUNT(CASE WHEN operation = 'delete' THEN 1 END)
+		FROM observed_writes`, job.ID).Scan(&touched, &updates, &deletes)
+	if err != nil || touched != 0 || updates != 1 || deletes != 1 {
+		t.Fatalf("unexpected recovery writes: unrelated=%d, updates=%d, deletes=%d, err=%v", touched, updates, deletes, err)
+	}
+	m.Close()
+	reopened := openTestActivityManager(t, file, NewGate(1)).List()
+	if len(reopened) != 1 || reopened[0].ID != untouched.ID || reopened[0].Error != untouched.Error {
+		t.Fatalf("unrelated recovery record changed: %+v", reopened)
 	}
 }

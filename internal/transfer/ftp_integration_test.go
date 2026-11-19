@@ -87,7 +87,7 @@ func TestFTPDirectoryActivityIntegration(t *testing.T) {
 			cleanupRemote()
 		}
 	}()
-	manager := OpenActivityManager(filepath.Join(t.TempDir(), "activity.json"), NewGate(2))
+	manager := openTestActivityManager(t, filepath.Join(t.TempDir(), "activity.json"), NewGate(2))
 	requests := make([]UploadRequest, 0, files)
 	for i := 0; i < files; i++ {
 		rel := filepath.Join(".git", "objects", fmt.Sprintf("%02x", i%16), fmt.Sprintf("%040x", i))

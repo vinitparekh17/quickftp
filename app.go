@@ -168,7 +168,10 @@ func (a *App) startup(ctx context.Context) {
 	a.settingsPath = settingsPath
 	a.settings = settings
 	a.gate = transfer.NewGate(settings.MaxConcurrent)
-	a.activity = transfer.OpenActivityManager(filepath.Join(paths.RootDir, "transfer-recovery.json"), a.gate)
+	a.activity, err = transfer.OpenActivityManager(db.Conn, filepath.Join(paths.RootDir, "transfer-recovery.json"), a.gate)
+	if err != nil {
+		log.Fatalf("open transfer recovery: %v", err)
+	}
 	a.activity.OnBatchChange = func(values []transfer.Activity) { wailsRuntime.EventsEmit(ctx, "transfer:batch", values) }
 	a.activity.OnChange = func(v transfer.Activity) { wailsRuntime.EventsEmit(ctx, "transfer:changed", v) }
 	a.activity.OnLog = func(level, line string) {
@@ -726,7 +729,7 @@ func (a *App) CancelTransfer(id string) error    { return a.activity.Cancel(id) 
 func (a *App) ResolveTransferConflict(id, policy string) error {
 	return a.activity.ResolveConflict(id, policy)
 }
-func (a *App) RemoveTransfer(id string) { a.activity.Remove(id) }
+func (a *App) RemoveTransfer(id string) error { return a.activity.Remove(id) }
 func (a *App) RetryTransfer(id string) error {
 	for _, x := range a.activity.List() {
 		if x.ID == id {

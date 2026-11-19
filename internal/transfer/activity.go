@@ -3,13 +3,14 @@ package transfer
 import (
 	"container/list"
 	"context"
-	"encoding/json"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,11 +66,6 @@ type ConnectionSnapshot struct {
 	CredentialKey string `json:"credentialKey"`
 }
 
-type activityFile struct {
-	Version int        `json:"version"`
-	Entries []Activity `json:"entries"`
-}
-
 type ActivityClient interface {
 	ListDirectory(context.Context, string) ([]RemoteFile, error)
 	Download(context.Context, string, io.Writer) error
@@ -80,7 +76,7 @@ type ActivityManager struct {
 	mu              sync.Mutex
 	workers         sync.WaitGroup
 	closed          bool
-	path            string
+	recoveryDB      *sql.DB
 	entries         []Activity
 	clients         map[string]ActivityClient
 	cancels         map[string]context.CancelFunc
@@ -94,45 +90,26 @@ type ActivityManager struct {
 	OnLog           func(string, string)
 }
 
-func OpenActivityManager(file string, gate *Gate) *ActivityManager {
+func OpenActivityManager(db *sql.DB, legacyFile string, gate *Gate) (*ActivityManager, error) {
+	entries, err := loadActivityRecovery(db, legacyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load transfer recovery: %w", err)
+	}
 	m := &ActivityManager{
-		path:      file,
-		Gate:      gate,
-		entries:   make([]Activity, 0),
-		clients:   make(map[string]ActivityClient),
-		cancels:   make(map[string]context.CancelFunc),
-		conflicts: make(map[string]chan string),
-		downloads: make(map[string]*downloadJob),
+		recoveryDB: db,
+		Gate:       gate,
+		entries:    entries,
+		clients:    make(map[string]ActivityClient),
+		cancels:    make(map[string]context.CancelFunc),
+		conflicts:  make(map[string]chan string),
+		downloads:  make(map[string]*downloadJob),
 	}
-	data, err := os.ReadFile(file)
-	if errors.Is(err, os.ErrNotExist) {
-		// Import unfinished work from the previous MVP file name once; completed
-		// transfer history is intentionally discarded on this migration.
-		data, err = os.ReadFile(filepath.Join(filepath.Dir(file), "transfers.json"))
-	}
-	if err == nil {
-		var v activityFile
-		if json.Unmarshal(data, &v) == nil {
-			for _, entry := range v.Entries {
-				if isUnfinishedStatus(entry.Status) {
-					if entry.Status != "Interrupted" {
-						entry.Status = "Interrupted"
-						entry.Error = "Application closed before this transfer completed"
-					}
-					m.entries = append(m.entries, entry)
-				} else if entry.Status == "Failed" || entry.Status == "Cancelled" {
-					m.entries = append(m.entries, entry)
-				}
-			}
+	for _, entry := range entries {
+		if entry.Direction == "Download" && entry.Status == "Interrupted" {
+			cleanInterruptedDownload(entry)
 		}
 	}
-	for i := range m.entries {
-		if m.entries[i].Direction == "Download" && m.entries[i].Status == "Interrupted" {
-			_ = os.Remove(m.entries[i].LocalPath + ".quickftp-" + m.entries[i].ID + ".partial")
-		}
-	}
-	m.persistLocked()
-	return m
+	return m, nil
 }
 
 func isUnfinishedStatus(status string) bool {
@@ -156,30 +133,6 @@ func (m *ActivityManager) List() []Activity {
 	out := make([]Activity, len(m.entries))
 	copy(out, m.entries)
 	return out
-}
-
-func (m *ActivityManager) persistLocked() error {
-	if m.path == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(m.path), 0700); err != nil {
-		return err
-	}
-	unfinished := make([]Activity, 0, len(m.entries))
-	for _, entry := range m.entries {
-		if entry.Direction != "Deployment upload" && (isUnfinishedStatus(entry.Status) || entry.Status == "Failed" || entry.Status == "Cancelled") {
-			unfinished = append(unfinished, entry)
-		}
-	}
-	data, err := json.MarshalIndent(activityFile{Version: 1, Entries: unfinished}, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := m.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, m.path)
 }
 
 func (m *ActivityManager) prependEntryLocked(a Activity) {
@@ -223,10 +176,12 @@ func (m *ActivityManager) update(id string, persist bool, fn func(*Activity)) {
 			break
 		}
 	}
+	var saveErr error
 	if found && persist {
-		m.persistLocked()
+		saveErr = m.saveRecoveryEntries([]Activity{item})
 	}
 	m.mu.Unlock()
+	m.reportRecoveryError(saveErr)
 	if found && m.OnChange != nil {
 		m.OnChange(item)
 	}
@@ -292,17 +247,15 @@ func (m *ActivityManager) AddDownloadsWithin(connID int64, connName, root string
 		m.mu.Unlock()
 		return nil, errors.New("transfer manager is closed")
 	}
-	previous := m.entries
-	all := make([]Activity, 0, len(entries)+len(previous))
-	for i := len(entries) - 1; i >= 0; i-- {
-		all = append(all, entries[i])
-	}
-	m.entries = append(all, previous...)
-	if err := m.persistLocked(); err != nil {
-		m.entries = previous
+	if err := m.saveRecoveryEntries(entries); err != nil {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("save download queue: %w", err)
 	}
+	all := make([]Activity, 0, len(entries)+len(m.entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		all = append(all, entries[i])
+	}
+	m.entries = append(all, m.entries...)
 	m.pruneHistoryLocked()
 	for _, entry := range entries {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -378,12 +331,15 @@ func (m *ActivityManager) AddUpload(connID int64, connName, remote, local, polic
 		m.mu.Unlock()
 		return Activity{}, errors.New("transfer manager is closed")
 	}
+	if err := m.saveRecoveryEntries([]Activity{a}); err != nil {
+		m.mu.Unlock()
+		return Activity{}, fmt.Errorf("save upload queue: %w", err)
+	}
 	m.workers.Add(1)
 	m.prependEntryLocked(a)
 	m.clients[id] = client
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancels[id] = cancel
-	m.persistLocked()
 	m.mu.Unlock()
 	if m.OnChange != nil {
 		m.OnChange(a)
@@ -396,7 +352,7 @@ func (m *ActivityManager) AddUpload(connID int64, connName, remote, local, polic
 type UploadRequest struct{ RemotePath, LocalPath string }
 
 // AddUploads admits a directory in one durable operation. Workers start only
-// after the full queue snapshot has been written, avoiding N full-history writes.
+// after the batch has been saved in one transaction.
 func (m *ActivityManager) AddUploads(connID int64, connName string, requests []UploadRequest, policy string, client ActivityClient, batch TransferBatch) ([]Activity, error) {
 	entries := make([]Activity, 0, len(requests))
 	for _, request := range requests {
@@ -415,7 +371,10 @@ func (m *ActivityManager) AddUploads(connID int64, connName string, requests []U
 		m.mu.Unlock()
 		return nil, errors.New("transfer manager is closed")
 	}
-	previous := m.entries
+	if err := m.saveRecoveryEntries(entries); err != nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("save directory upload queue: %w", err)
+	}
 	all := make([]Activity, 0, len(entries)+len(m.entries))
 	for i := len(entries) - 1; i >= 0; i-- {
 		all = append(all, entries[i])
@@ -428,16 +387,6 @@ func (m *ActivityManager) AddUploads(connID int64, connName string, requests []U
 		m.clients[entry.ID] = client
 	}
 	m.pruneHistoryLocked()
-	if err := m.persistLocked(); err != nil {
-		m.entries = previous
-		for _, entry := range entries {
-			m.cancels[entry.ID]()
-			delete(m.cancels, entry.ID)
-			delete(m.clients, entry.ID)
-		}
-		m.mu.Unlock()
-		return nil, fmt.Errorf("save directory upload queue: %w", err)
-	}
 	m.workers.Add(len(entries))
 	m.mu.Unlock()
 	if m.OnBatchChange != nil {
@@ -828,10 +777,12 @@ func (m *ActivityManager) finish(id, status string, err error) {
 	delete(m.conflicts, id)
 	delete(m.downloads, id)
 	m.pruneHistoryLocked()
-	if !m.closed {
-		m.persistLocked()
+	var saveErr error
+	if found {
+		saveErr = m.saveRecoveryEntries([]Activity{item})
 	}
 	m.mu.Unlock()
+	m.reportRecoveryError(saveErr)
 
 	if found && m.OnChange != nil {
 		m.OnChange(item)
@@ -901,9 +852,6 @@ func (m *ActivityManager) Close() {
 		m.cancelPendingDownload(id)
 	}
 	m.workers.Wait()
-	m.mu.Lock()
-	m.persistLocked()
-	m.mu.Unlock()
 }
 
 func (m *ActivityManager) Cancel(id string) error {
@@ -979,7 +927,7 @@ func (m *ActivityManager) Retry(id string, client ActivityClient) error {
 		_, err = m.AddDownloadWithin(old.ConnectionID, old.ConnectionName, old.RemotePath, root, old.LocalPath, old.Total, old.ConflictPolicy, client, TransferBatch{ID: old.BatchID, Name: old.BatchName})
 	}
 	if err == nil {
-		m.Remove(id)
+		m.reportRecoveryError(m.Remove(id))
 	}
 	return err
 }
@@ -1001,37 +949,47 @@ func (m *ActivityManager) ClearHistory(connectionID int64) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	removed := []string{}
-	previous := m.entries
+	var recoveryIDs []string
 	kept := make([]Activity, 0, len(m.entries))
 	for _, entry := range m.entries {
 		if entry.Direction != "Deployment upload" && !isActiveStatus(entry.Status) && (connectionID == 0 || entry.ConnectionID == connectionID) {
 			removed = append(removed, entry.ID)
+			if retainRecovery(entry) {
+				recoveryIDs = append(recoveryIDs, entry.ID)
+			}
 		} else {
 			kept = append(kept, entry)
 		}
 	}
-	m.entries = kept
-	if err := m.persistLocked(); err != nil {
-		m.entries = previous
+	if err := m.removeRecoveryEntries(recoveryIDs); err != nil {
 		return nil, err
 	}
+	m.entries = kept
 	return removed, nil
 }
 
-func (m *ActivityManager) Remove(id string) {
+func (m *ActivityManager) Remove(id string) error {
 	m.mu.Lock()
-	out := m.entries[:0]
-	for _, x := range m.entries {
-		if x.ID != id || isActiveStatus(x.Status) {
-			out = append(out, x)
+	var err error
+	for i, entry := range m.entries {
+		if entry.ID == id && !isActiveStatus(entry.Status) {
+			if retainRecovery(entry) {
+				err = m.removeRecoveryEntries([]string{id})
+			}
+			if err == nil {
+				m.entries = slices.Delete(m.entries, i, i+1)
+			}
+			break
 		}
 	}
-	for i := len(out); i < len(m.entries); i++ {
-		m.entries[i] = Activity{}
-	}
-	m.entries = out
-	m.persistLocked()
 	m.mu.Unlock()
+	return err
+}
+
+func (m *ActivityManager) reportRecoveryError(err error) {
+	if err != nil {
+		m.log("ERROR", fmt.Sprintf("Could not save transfer recovery: %v", err))
+	}
 }
 
 func (m *ActivityManager) log(level, msg string) {
