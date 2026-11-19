@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
+  import { transferProfile } from '../profileBackup';
   import { onMount } from 'svelte';
   import type { ConnectionDTO } from '../types';
   import {
@@ -17,6 +18,17 @@
   let testingId: number | null = null;
   let connectionState: Record<number, 'checking' | 'connected' | 'failed'> = {};
   let loading = true;
+  let transferringProfile = false;
+
+  async function handleProfileTransfer(id?: number) {
+    if (transferringProfile) return;
+    transferringProfile = true;
+    try {
+      await transferProfile('connection', loadConnections, id);
+    } finally {
+      transferringProfile = false;
+    }
+  }
 
   onMount(async () => {
     await loadConnections();
@@ -95,9 +107,18 @@
         Saved servers, credentials, and connection tests.
       </p>
     </div>
-    <button class="btn btn-primary" on:click={handleAdd}
-      ><Icon name="plus" size={15} /> Add connection</button
-    >
+    <div class="profile-heading-actions">
+      <button
+        class="btn btn-secondary"
+        disabled={transferringProfile || loading}
+        on:click={() => handleProfileTransfer()}
+      >
+        <Icon name="upload" size={15} /> Import connection
+      </button>
+      <button class="btn btn-primary" on:click={handleAdd}
+        ><Icon name="plus" size={15} /> Add connection</button
+      >
+    </div>
   </section>
   <div class="card page-card resource-list-card">
     {#if loading}<div class="files-state">
@@ -175,6 +196,13 @@
                       aria-label={`Edit ${c.name}`}
                       ><Icon name="edit" size={16} /></button
                     ><button
+                      class="table-icon-action action-secondary"
+                      disabled={transferringProfile}
+                      on:click={() => handleProfileTransfer(c.id)}
+                      title={`Export ${c.name}`}
+                      aria-label={`Export ${c.name}`}
+                      ><Icon name="download" size={16} /></button
+                    ><button
                       class="table-icon-action action-danger"
                       on:click={() => handleDelete(c)}
                       title={`Delete ${c.name}`}
@@ -195,3 +223,12 @@
     on:saved={handleSaved}
     on:cancel={handleCancel}
   />{/if}
+
+<style>
+  .profile-heading-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+</style>

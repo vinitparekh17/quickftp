@@ -780,3 +780,22 @@ export async function importData(): Promise<{
     throw new Error('Data import requires the QuickFTP desktop app');
   return await window.go.main.App.ImportData();
 }
+
+export type ProfileKind = 'project' | 'connection';
+
+export async function exportProfile(
+  kind: ProfileKind,
+  id: number
+): Promise<boolean> {
+  if (!isWails)
+    throw new Error('Profile export requires the QuickFTP desktop app');
+  return await window.go.main.App.ExportProfile(kind, id);
+}
+
+export async function importProfile(
+  kind: ProfileKind
+): Promise<{ skipped: number } | null> {
+  if (!isWails)
+    throw new Error('Profile import requires the QuickFTP desktop app');
+  return await window.go.main.App.ImportProfile(kind);
+}

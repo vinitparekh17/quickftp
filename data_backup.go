@@ -28,13 +28,17 @@ type DataBackup struct {
 	Version       int                `json:"version"`
 	Connections   []BackupConnection `json:"connections"`
 	Projects      []ProjectDTO       `json:"projects"`
-	Configuration *SettingsDTO       `json:"configuration"`
+	Configuration *SettingsDTO       `json:"configuration,omitempty"`
 }
 
 type ImportResult struct {
 	Connections int `json:"connections"`
 	Projects    int `json:"projects"`
 	Skipped     int `json:"skipped"`
+}
+
+func backupConnection(c ConnectionDTO) BackupConnection {
+	return BackupConnection{c.Name, c.Host, c.Port, c.Protocol, c.Username, c.RemoteRoot, c.TLSVerify}
 }
 
 func (a *App) backupData() ([]byte, error) {
@@ -49,7 +53,7 @@ func (a *App) backupData() ([]byte, error) {
 	settings := a.GetSettings()
 	backup := DataBackup{Format: "quickftp", Version: 1, Connections: make([]BackupConnection, 0, len(connections)), Projects: projects, Configuration: &settings}
 	for _, c := range connections {
-		backup.Connections = append(backup.Connections, BackupConnection{c.Name, c.Host, c.Port, c.Protocol, c.Username, c.RemoteRoot, c.TLSVerify})
+		backup.Connections = append(backup.Connections, backupConnection(c))
 	}
 	for i := range backup.Projects {
 		backup.Projects[i].ID = 0
@@ -63,7 +67,11 @@ func (a *App) ExportData() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	filename, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{Title: "Export QuickFTP data", DefaultFilename: "quickftp-backup.json", Filters: []wailsRuntime.FileFilter{{DisplayName: "QuickFTP backup (*.json)", Pattern: "*.json"}}})
+	return a.saveBackupFile("Export QuickFTP data", "quickftp-backup.json", data)
+}
+
+func (a *App) saveBackupFile(title, defaultName string, data []byte) (bool, error) {
+	filename, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{Title: title, DefaultFilename: defaultName, Filters: []wailsRuntime.FileFilter{{DisplayName: "QuickFTP backup (*.json)", Pattern: "*.json"}}})
 	if err != nil || filename == "" {
 		return false, err
 	}
@@ -72,15 +80,30 @@ func (a *App) ExportData() (bool, error) {
 }
 
 func decodeBackup(raw []byte) (*DataBackup, error) {
+	return decodeBackupFormat(raw, "quickftp")
+}
+
+func decodeBackupFormat(raw []byte, format string) (*DataBackup, error) {
 	var b DataBackup
 	if err := json.Unmarshal(raw, &b); err != nil {
 		return nil, fmt.Errorf("invalid backup JSON: %w", err)
 	}
-	if b.Format != "quickftp" || b.Version != 1 {
+	if b.Format != format || b.Version != 1 {
 		return nil, fmt.Errorf("unsupported QuickFTP backup format or version")
 	}
-	if b.Connections == nil || b.Projects == nil || b.Configuration == nil {
-		return nil, fmt.Errorf("backup must include connections, projects and configuration")
+	switch format {
+	case "quickftp-project":
+		if len(b.Projects) != 1 || len(b.Connections) != 0 || b.Configuration != nil {
+			return nil, fmt.Errorf("expected a backup containing exactly one project")
+		}
+	case "quickftp-connection":
+		if len(b.Connections) != 1 || len(b.Projects) != 0 || b.Configuration != nil {
+			return nil, fmt.Errorf("expected a backup containing exactly one connection")
+		}
+	default:
+		if b.Connections == nil || b.Projects == nil || b.Configuration == nil {
+			return nil, fmt.Errorf("backup must include connections, projects and configuration")
+		}
 	}
 	names := map[string]bool{}
 	for _, c := range b.Connections {
@@ -106,6 +129,9 @@ func decodeBackup(raw []byte) (*DataBackup, error) {
 		names[p.Name] = true
 	}
 	s := b.Configuration
+	if s == nil {
+		return &b, nil
+	}
 	if strings.TrimSpace(s.BackupDir) == "" || strings.TrimSpace(s.DownloadDir) == "" || s.MaxConcurrent < 1 || s.MaxConcurrent > 5 {
 		return nil, fmt.Errorf("invalid configuration")
 	}
@@ -122,6 +148,10 @@ func (a *App) importData(raw []byte) (*ImportResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	return a.applyBackup(b)
+}
+
+func (a *App) applyBackup(b *DataBackup) (*ImportResult, error) {
 	a.deployMu.Lock()
 	defer a.deployMu.Unlock()
 	if a.deployCancel != nil {
@@ -161,6 +191,12 @@ func (a *App) importData(raw []byte) (*ImportResult, error) {
 		result.Projects += int(n)
 		result.Skipped += 1 - int(n)
 	}
+	if b.Configuration == nil {
+		if err = tx.Commit(); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
 	old := a.settings
 	old.BackupDir = a.service.BackupRoot
 	if err = a.saveSettingsLocked(*b.Configuration); err != nil {
@@ -177,7 +213,15 @@ func (a *App) importData(raw []byte) (*ImportResult, error) {
 
 // ImportData only reads the file selected by the user. It never runs imported builds.
 func (a *App) ImportData() (*ImportResult, error) {
-	filename, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{Title: "Import QuickFTP data", Filters: []wailsRuntime.FileFilter{{DisplayName: "QuickFTP backup (*.json)", Pattern: "*.json"}}})
+	raw, err := a.openBackupFile("Import QuickFTP data")
+	if err != nil || raw == nil {
+		return nil, err
+	}
+	return a.importData(raw)
+}
+
+func (a *App) openBackupFile(title string) ([]byte, error) {
+	filename, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{Title: title, Filters: []wailsRuntime.FileFilter{{DisplayName: "QuickFTP backup (*.json)", Pattern: "*.json"}}})
 	if err != nil || filename == "" {
 		return nil, err
 	}
@@ -194,7 +238,7 @@ func (a *App) ImportData() (*ImportResult, error) {
 	if len(raw) > limit {
 		return nil, fmt.Errorf("backup exceeds 10 MiB")
 	}
-	return a.importData(raw)
+	return raw, nil
 }
 
 // Write through a private temporary file so failed writes leave the previous file intact.
