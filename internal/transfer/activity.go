@@ -29,6 +29,7 @@ type Activity struct {
 	ConnectionName string             `json:"connectionName"`
 	RemotePath     string             `json:"remotePath"`
 	LocalPath      string             `json:"localPath"`
+	DownloadRoot   string             `json:"downloadRoot,omitempty"`
 	Status         string             `json:"status"`
 	Bytes          int64              `json:"bytes"`
 	Total          int64              `json:"total"`
@@ -227,10 +228,18 @@ func (m *ActivityManager) update(id string, persist bool, fn func(*Activity)) {
 }
 
 func (m *ActivityManager) AddDownload(connID int64, connName, remote, local string, size int64, policy string, client ActivityClient, batch ...TransferBatch) (Activity, error) {
+	return m.AddDownloadWithin(connID, connName, remote, filepath.Dir(local), local, size, policy, client, batch...)
+}
+
+func (m *ActivityManager) AddDownloadWithin(connID int64, connName, remote, root, local string, size int64, policy string, client ActivityClient, batch ...TransferBatch) (Activity, error) {
 	if err := safeRemotePath(remote); err != nil {
 		return Activity{}, err
 	}
-	local, err := filepath.Abs(local)
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return Activity{}, err
+	}
+	local, err = ValidateDownloadDestination(root, local)
 	if err != nil {
 		return Activity{}, err
 	}
@@ -242,6 +251,7 @@ func (m *ActivityManager) AddDownload(connID int64, connName, remote, local stri
 		ConnectionName: connName,
 		RemotePath:     path.Clean("/" + remote),
 		LocalPath:      local,
+		DownloadRoot:   root,
 		Status:         "Queued",
 		Total:          size,
 		StartedAt:      time.Now(),
@@ -609,7 +619,7 @@ func (m *ActivityManager) runDownload(ctx context.Context, a Activity) {
 	}
 	defer m.releaseClient(a.ID, client)
 
-	if err := os.MkdirAll(filepath.Dir(a.LocalPath), 0700); err != nil {
+	if _, err := ValidateDownloadDestination(a.DownloadRoot, a.LocalPath); err != nil {
 		m.finish(a.ID, "Failed", err)
 		return
 	}
@@ -658,15 +668,33 @@ func (m *ActivityManager) runDownload(ctx context.Context, a Activity) {
 	if policy == "Rename" {
 		target = uniqueLocalName(target)
 	}
+	if _, err := ValidateDownloadDestination(a.DownloadRoot, target); err != nil {
+		m.finish(a.ID, "Failed", err)
+		return
+	}
+	root, err := os.OpenRoot(a.DownloadRoot)
+	if err != nil {
+		m.finish(a.ID, "Failed", err)
+		return
+	}
+	defer root.Close()
+	rel, err := filepath.Rel(a.DownloadRoot, target)
+	if err != nil || !filepath.IsLocal(rel) || rel == "." {
+		m.finish(a.ID, "Failed", errors.New("invalid download destination"))
+		return
+	}
+	if err := root.MkdirAll(filepath.Dir(rel), 0700); err != nil {
+		m.finish(a.ID, "Failed", err)
+		return
+	}
 	if policy != "Overwrite" && policy != "Rename" {
-		if _, e := os.Lstat(target); e == nil {
+		if _, e := root.Lstat(rel); e == nil {
 			m.finish(a.ID, "Failed", errors.New("destination exists; resolve conflict and retry"))
 			return
 		}
 	}
-	tmp := target + ".quickftp-" + a.ID + ".partial"
-	_ = os.Remove(tmp)
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	tmp := rel + ".quickftp-" + a.ID + ".partial"
+	f, err := root.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		m.finish(a.ID, "Failed", err)
 		return
@@ -690,16 +718,16 @@ func (m *ActivityManager) runDownload(ctx context.Context, a Activity) {
 	if err == nil {
 		var publishErr error
 		if policy == "Overwrite" {
-			if info, statErr := os.Lstat(target); statErr == nil && info.IsDir() {
+			if info, statErr := root.Lstat(rel); statErr == nil && info.IsDir() {
 				publishErr = errors.New("cannot overwrite a directory with a file")
 			} else {
-				publishErr = os.Rename(tmp, target)
+				publishErr = root.Rename(tmp, rel)
 			}
 		} else {
-			if _, statErr := os.Lstat(target); statErr == nil {
+			if _, statErr := root.Lstat(rel); statErr == nil {
 				publishErr = errors.New("destination already exists")
 			} else {
-				publishErr = os.Rename(tmp, target)
+				publishErr = root.Rename(tmp, rel)
 			}
 		}
 		if publishErr != nil {
@@ -715,7 +743,7 @@ func (m *ActivityManager) runDownload(ctx context.Context, a Activity) {
 		}
 	}
 	if err != nil {
-		_ = os.Remove(tmp)
+		_ = root.Remove(tmp)
 		if ctx.Err() != nil {
 			m.finish(a.ID, "Cancelled", ctx.Err())
 		} else {
@@ -869,7 +897,11 @@ func (m *ActivityManager) Retry(id string, client ActivityClient) error {
 	if old.Direction == "Upload" {
 		_, err = m.AddUpload(old.ConnectionID, old.ConnectionName, old.RemotePath, old.LocalPath, old.ConflictPolicy, client, TransferBatch{ID: old.BatchID, Name: old.BatchName})
 	} else {
-		_, err = m.AddDownload(old.ConnectionID, old.ConnectionName, old.RemotePath, old.LocalPath, old.Total, old.ConflictPolicy, client, TransferBatch{ID: old.BatchID, Name: old.BatchName})
+		root := old.DownloadRoot
+		if root == "" {
+			root = filepath.Dir(old.LocalPath)
+		}
+		_, err = m.AddDownloadWithin(old.ConnectionID, old.ConnectionName, old.RemotePath, root, old.LocalPath, old.Total, old.ConflictPolicy, client, TransferBatch{ID: old.BatchID, Name: old.BatchName})
 	}
 	if err == nil {
 		m.Remove(id)

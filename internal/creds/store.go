@@ -1,6 +1,7 @@
 package creds
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 )
@@ -17,4 +18,9 @@ type Store interface {
 // FormatTargetKey creates a consistent key for the connections.cred_target_key column.
 func FormatTargetKey(connectionName string) string {
 	return fmt.Sprintf("QuickFTP/%s", connectionName)
+}
+
+// NewTargetKey allocates an immutable credential identity independently of the profile name.
+func NewTargetKey() string {
+	return "QuickFTP/profile/" + rand.Text()
 }

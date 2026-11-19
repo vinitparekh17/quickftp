@@ -49,7 +49,7 @@ func TestBackupRoundTripAndMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.CredTargetKey != creds.FormatTargetKey("server") {
+	if !strings.HasPrefix(c.CredTargetKey, "QuickFTP/profile/") {
 		t.Fatal("missing local credential identity")
 	}
 	raw, err = a.backupData()
@@ -136,27 +136,69 @@ func TestImportRollsBackOnSettingsFailure(t *testing.T) {
 	}
 }
 
-func TestImportRollsBackOnCredentialKeyConflict(t *testing.T) {
+func TestCredentialIdentitySurvivesRenameAndNameReuse(t *testing.T) {
 	a := backupTestApp(t)
-	// A renamed profile retains its old credential key.
-	c := &storage.Connection{Name: "renamed", Host: "old.example.com", Port: 21, Protocol: storage.ProtocolFTPSExplicit, Username: "user", RemoteRoot: "/", TLSVerify: true, CredTargetKey: creds.FormatTargetKey("server")}
-	if err := a.db.UpsertConnection(c); err != nil {
+	legacyKey := creds.FormatTargetKey("server")
+	c := &storage.Connection{Name: "server", Host: "old.example.com", Port: 21, Protocol: storage.ProtocolFTPSExplicit, Username: "user", RemoteRoot: "/", TLSVerify: true, CredTargetKey: legacyKey}
+	if err := a.db.CreateConnection(c); err != nil {
 		t.Fatal(err)
 	}
+	dto := connectionToDTO(*c)
+	dto.Name = "renamed"
+	if err := a.SaveConnection(dto); err != nil {
+		t.Fatal(err)
+	}
+
 	b := sampleBackup(a)
 	raw, _ := json.Marshal(b)
-	settingsBefore, _ := os.ReadFile(a.settingsPath)
-	if _, err := a.importData(raw); err == nil {
-		t.Fatal("expected key conflict")
+	if _, err := a.importData(raw); err != nil {
+		t.Fatal(err)
 	}
-	cs, _ := a.db.ListConnections()
-	ps, _ := a.db.ListProjects()
-	if len(cs) != 1 || len(ps) != 0 {
-		t.Fatal("partial import")
+	imported, err := a.db.GetConnectionByName("server")
+	if err != nil || imported.CredTargetKey == legacyKey {
+		t.Fatalf("import reused the old key: %v", err)
 	}
-	settingsAfter, _ := os.ReadFile(a.settingsPath)
-	if string(settingsBefore) != string(settingsAfter) {
-		t.Fatal("settings changed")
+	dto.ID, dto.Name = 0, "new"
+	if err := a.SaveConnection(dto); err != nil {
+		t.Fatal(err)
+	}
+	created, err := a.db.GetConnectionByName("new")
+	if err != nil || created.CredTargetKey == legacyKey || created.CredTargetKey == imported.CredTargetKey {
+		t.Fatalf("new connection reused an existing key: %v", err)
+	}
+	if err := a.SaveConnection(dto); err == nil {
+		t.Fatal("duplicate creation replaced an existing profile")
+	}
+	renamed, err := a.db.GetConnectionByName("renamed")
+	if err != nil || renamed.CredTargetKey != legacyKey {
+		t.Fatalf("renamed connection lost its key: %v", err)
+	}
+}
+
+func TestImportedTLSVerificationDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name, field string
+		verify      bool
+	}{
+		{"omitted", "", true},
+		{"explicitly disabled", `,"tlsVerify":false`, false},
+		{"enabled", `,"tlsVerify":true`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := backupTestApp(t)
+			raw := []byte(`{"format":"quickftp-connection","version":1,"connections":[{"name":"server","host":"example.com","port":21,"protocol":"ftps_explicit","username":"user"` + tc.field + `}]}`)
+			b, err := decodeBackupFormat(raw, "quickftp-connection")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.applyBackup(b); err != nil {
+				t.Fatal(err)
+			}
+			got, err := a.db.GetConnectionByName("server")
+			if err != nil || got.TLSVerify != tc.verify {
+				t.Fatalf("expected verification %v: %v", tc.verify, err)
+			}
+		})
 	}
 }
 
