@@ -40,11 +40,21 @@ type Client interface {
 
 type Artifact struct{ LocalPath, RelativePath string }
 
+type BackupMode string
+
+const (
+	BackupEverything      BackupMode = "all"
+	BackupWithoutExcluded BackupMode = "without_excluded"
+	WithoutBackup         BackupMode = "none"
+)
+
 type Engine struct {
 	DB                     *storage.DB
 	StartedDeploymentID    int64
 	Client                 Client
 	RemoteRoot, BackupRoot string
+	BackupMode             BackupMode
+	Excluded               func(relative string) (bool, error)
 	OnPhase                func(string)
 	OnStarted              func(int64)
 	OnLog                  func(string, string)
@@ -64,13 +74,16 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 	if len(artifacts) == 0 {
 		return 0, errors.New("no deployment artifacts selected")
 	}
-	if err := os.MkdirAll(e.BackupRoot, 0700); err != nil {
-		return 0, fmt.Errorf("create backup directory: %w", err)
+	switch e.BackupMode {
+	case "", BackupEverything, BackupWithoutExcluded, WithoutBackup:
+	default:
+		return 0, fmt.Errorf("unknown backup mode %q", e.BackupMode)
 	}
+	skipBackup := e.BackupMode == WithoutBackup
 	id := e.StartedDeploymentID
 	if id == 0 {
 		var err error
-		id, err = e.DB.StartDeployment(projectID, connectionID, e.BackupRoot)
+		id, err = e.DB.StartDeployment(projectID, connectionID, "")
 		if err != nil {
 			return 0, err
 		}
@@ -87,10 +100,13 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 	if e.OnStarted != nil {
 		e.OnStarted(id)
 	}
-	backupDir := filepath.Join(e.BackupRoot, fmt.Sprintf("deployment-%d", id))
-	if err = os.MkdirAll(backupDir, 0700); err != nil {
-		_ = e.DB.FinishDeployment(id, "failed", err.Error())
-		return id, fmt.Errorf("create deployment backup directory: %w", err)
+	backupDir := ""
+	if !skipBackup {
+		backupDir = filepath.Join(e.BackupRoot, fmt.Sprintf("deployment-%d", id))
+		if err = os.MkdirAll(backupDir, 0700); err != nil {
+			_ = e.DB.FinishDeployment(id, "failed", err.Error())
+			return id, fmt.Errorf("create deployment backup directory: %w", err)
+		}
 	}
 	if err = e.DB.SetDeploymentBackupDir(id, backupDir); err != nil {
 		_ = e.DB.FinishDeployment(id, "failed", err.Error())
@@ -153,27 +169,51 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 		return fail("backup", fmt.Errorf("list remote root: %w", err))
 	}
 
+	type remoteEntry struct {
+		RemoteFile
+		relative string
+		excluded bool
+	}
+	remoteFiles := make([]remoteEntry, 0, len(remote))
+	existing := make(map[string]bool, len(remote))
 	backupTotal := 0
 	for _, rf := range remote {
-		if !rf.IsDir {
+		if rf.IsDir {
+			continue
+		}
+		rel, err := remoteRelative(e.RemoteRoot, rf.Path)
+		if err != nil {
+			return fail("discover", err)
+		}
+		excluded := false
+		if e.Excluded != nil {
+			excluded, err = e.Excluded(rel)
+			if err != nil {
+				return fail("discover", err)
+			}
+		}
+		remoteFiles = append(remoteFiles, remoteEntry{rf, rel, excluded})
+		existing[rel] = true
+		if !skipBackup && !(excluded && e.BackupMode == BackupWithoutExcluded) {
 			backupTotal++
 		}
 	}
 	backed := make(map[string]bool, backupTotal)
-	e.setPhase(id, "backup")
+	if skipBackup {
+		e.log("stdout", "Backup skipped by request. Stale remote files will be kept.")
+	} else {
+		e.setPhase(id, "backup")
+	}
 	backupDone := 0
-	for _, rf := range remote {
+	for _, rf := range remoteFiles {
 		if err := ctx.Err(); err != nil {
 			return fail("backup", err)
 		}
-		if rf.IsDir {
+		if skipBackup || (rf.excluded && e.BackupMode == BackupWithoutExcluded) {
 			continue
 		}
 		backupDone++
-		rel, err := remoteRelative(e.RemoteRoot, rf.Path)
-		if err != nil {
-			return fail("backup", err)
-		}
+		rel := rf.relative
 		dst, err := localJoin(backupDir, rel)
 		if err != nil {
 			return fail("backup", err)
@@ -218,7 +258,7 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 	}
 
 	if e.IISOfflinePage != "" {
-		if backed["app_offline.htm"] {
+		if existing["app_offline.htm"] {
 			return fail("backup", errors.New("remote app_offline.htm already exists; refusing to replace an existing offline marker"))
 		}
 		markerArmed = true // Also clean up when STOR succeeds but its final reply is lost.
@@ -294,6 +334,9 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 			ok, checkErr := e.remoteMatches(ctx, target, f.digest)
 			if checkErr != nil || !ok {
 				e.fileTransfer(id, target, f.LocalPath, f.size, 0, "Failed", err.Error())
+				if skipBackup && existing[f.relative] {
+					return fail("upload", fmt.Errorf("could not replace %s without a backup: %w; the server must allow rename over an existing file. Retry with a backup enabled", f.relative, err))
+				}
 				return fail("upload", fmt.Errorf("promote %s outcome unresolved: %w", f.relative, err))
 			}
 		} else {
@@ -317,20 +360,16 @@ func (e *Engine) Deploy(ctx context.Context, projectID, connectionID int64, arti
 		e.fileTransfer(id, target, f.LocalPath, f.size, f.size, "Completed", "")
 	}
 
-	// Delete stale files only after all new artifacts are backed up and verified.
-	e.setPhase(id, "delete")
-	for _, rf := range remote {
+	// Only prune files that were in scope and have a verified backup.
+	if !skipBackup {
+		e.setPhase(id, "delete")
+	}
+	for _, rf := range remoteFiles {
 		if err := ctx.Err(); err != nil {
 			return fail("delete", err)
 		}
-		if rf.IsDir {
-			continue
-		}
-		rel, err := remoteRelative(e.RemoteRoot, rf.Path)
-		if err != nil {
-			return fail("delete", err)
-		}
-		if seen[rel] {
+		rel := rf.relative
+		if skipBackup || rf.excluded || seen[rel] {
 			continue
 		}
 		if !backed[rel] {
@@ -444,6 +483,10 @@ func (e *Engine) Rollback(ctx context.Context, deploymentID int64) error {
 	}
 	if d.Status != "failed" && d.Status != "running" {
 		return fmt.Errorf("deployment %d is %s and cannot be rolled back", deploymentID, d.Status)
+	}
+
+	if d.BackupDir == "" {
+		return fmt.Errorf("deployment %d has no backup; rollback is unavailable", deploymentID)
 	}
 
 	// Safety check: rollback is only allowed for the most recent deployment on this connection.

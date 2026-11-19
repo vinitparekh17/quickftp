@@ -96,11 +96,9 @@ func prepare(ctx context.Context, p Project, log LogFunc) ([]Artifact, error) {
 	if !info.IsDir() {
 		return nil, errors.New("output path must be a directory")
 	}
-	var rules artifactRules
-	if p.ArtifactRulesJSON != "" && p.ArtifactRulesJSON != "{}" {
-		if err := json.Unmarshal([]byte(p.ArtifactRulesJSON), &rules); err != nil {
-			return nil, fmt.Errorf("parse artifact rules: %w", err)
-		}
+	rules, err := parseArtifactRules(p.ArtifactRulesJSON)
+	if err != nil {
+		return nil, err
 	}
 	var artifacts []Artifact
 	err = filepath.WalkDir(output, func(name string, d os.DirEntry, walkErr error) error {
@@ -136,6 +134,43 @@ func prepare(ctx context.Context, p Project, log LogFunc) ([]Artifact, error) {
 	return artifacts, nil
 }
 
+func parseArtifactRules(raw string) (artifactRules, error) {
+	var rules artifactRules
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &rules); err != nil {
+			return rules, fmt.Errorf("parse artifact rules: %w", err)
+		}
+	}
+	return rules, nil
+}
+
+// ArtifactExcluder uses the same exclusion rules for remote and local paths.
+func ArtifactExcluder(raw string) (func(string) (bool, error), error) {
+	rules, err := parseArtifactRules(raw)
+	return rules.excludes, err
+}
+
+func (rules artifactRules) excludes(name string) (bool, error) {
+	for _, pattern := range rules.Exclude {
+		normalized := strings.ReplaceAll(pattern, "\\", "/")
+		prefix := path.Clean(normalized)
+		if !strings.ContainsAny(prefix, "*?[") && strings.HasPrefix(name, prefix+"/") {
+			return true, nil
+		}
+		if strings.HasSuffix(normalized, "/") {
+			normalized = prefix + "/**"
+		}
+		match, err := matchArtifactPattern(name, normalized)
+		if err != nil {
+			return false, fmt.Errorf("invalid artifact exclude pattern %q: %w", pattern, err)
+		}
+		if match {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func matchesRules(name string, rules artifactRules) (bool, error) {
 	included := len(rules.Include) == 0
 	for _, pattern := range rules.Include {
@@ -150,16 +185,8 @@ func matchesRules(name string, rules artifactRules) (bool, error) {
 	if !included {
 		return false, nil
 	}
-	for _, pattern := range rules.Exclude {
-		match, err := matchArtifactPattern(name, pattern)
-		if err != nil {
-			return false, fmt.Errorf("invalid artifact exclude pattern %q: %w", pattern, err)
-		}
-		if match {
-			return false, nil
-		}
-	}
-	return true, nil
+	excluded, err := rules.excludes(name)
+	return !excluded, err
 }
 
 // matchArtifactPattern supports ** as a whole path segment for recursive directory selection.

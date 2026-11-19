@@ -67,6 +67,7 @@ export interface DeploymentFileDTO {
 }
 
 export interface DeployOptions {
+  backupMode?: 'all' | 'none' | 'without_excluded';
   iisOfflinePage: string;
   iisShutdownDelay: number; // milliseconds
 }

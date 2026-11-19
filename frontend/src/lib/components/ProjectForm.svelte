@@ -272,7 +272,11 @@
               rows="8"
               placeholder={'*.pdb\nappsettings.Development.json'}
             ></textarea>
-            <div class="form-hint">Excluded files are never uploaded.</div>
+            <div class="form-hint">
+              Excluded paths are kept on the server during deployment. Enter a
+              folder such as <code>media</code> to exclude its contents. The backup
+              mode controls whether excluded files are copied locally.
+            </div>
           </div>
         </div>
         <div class="selection-note">
