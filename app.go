@@ -206,6 +206,12 @@ func (a *App) SelectFiles(title string) ([]string, error) {
 }
 
 func (a *App) SaveSettings(settings SettingsDTO) error {
+	a.deployMu.Lock()
+	defer a.deployMu.Unlock()
+	return a.saveSettingsLocked(settings)
+}
+
+func (a *App) saveSettingsLocked(settings SettingsDTO) error {
 	if strings.TrimSpace(settings.BackupDir) == "" {
 		return fmt.Errorf("backup directory is required")
 	}
@@ -213,8 +219,6 @@ func (a *App) SaveSettings(settings SettingsDTO) error {
 	if err != nil {
 		return err
 	}
-	a.deployMu.Lock()
-	defer a.deployMu.Unlock()
 	if err = os.MkdirAll(backupDir, 0700); err != nil {
 		return fmt.Errorf("create backup directory: %w", err)
 	}
@@ -242,7 +246,7 @@ func (a *App) SaveSettings(settings SettingsDTO) error {
 	if err != nil {
 		return err
 	}
-	if err = os.WriteFile(a.settingsPath, data, 0600); err != nil {
+	if err = writePrivateFile(a.settingsPath, data); err != nil {
 		return err
 	}
 	a.service.BackupRoot = backupDir

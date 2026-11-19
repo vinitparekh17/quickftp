@@ -1,8 +1,16 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
   import { onMount } from 'svelte';
-  import { addToast } from '../stores';
-  import { getSettings, saveSettings, selectDirectory } from '../wailsjs';
+  import { addToast, connections, projects } from '../stores';
+  import {
+    getSettings,
+    saveSettings,
+    selectDirectory,
+    exportData,
+    importData,
+    getConnections,
+    getProjects,
+  } from '../wailsjs';
 
   let backupDir = '%LOCALAPPDATA%\\QuickFTP\\backups';
   let downloadDir = '';
@@ -10,6 +18,53 @@
   let uploadConflict = 'Ask';
   let maxConcurrent = 2;
   let saving = false;
+  let transferring = false;
+
+  async function transferData(importing: boolean) {
+    transferring = true;
+    try {
+      if (importing) {
+        if (
+          !window.confirm(
+            'Import connections, projects and configuration? Existing profiles with matching names will be kept. Saved preferences will be replaced. Review imported build commands and local paths before deploying.'
+          )
+        )
+          return;
+        const result = await importData();
+        if (!result) return;
+        const [cs, ps, s] = await Promise.all([
+          getConnections(),
+          getProjects(),
+          getSettings(),
+        ]);
+        connections.set(cs);
+        projects.set(ps);
+        backupDir = s.backupDir;
+        downloadDir = s.downloadDir;
+        downloadConflict = s.downloadConflict;
+        uploadConflict = s.uploadConflict;
+        maxConcurrent = s.maxConcurrent;
+        localStorage.setItem('quickftp.backupDir', backupDir);
+        addToast(
+          'success',
+          `Imported ${result.connections} connections and ${result.projects} projects; ${result.skipped} existing profiles kept. Re-enter passwords for new connections.`,
+          8000
+        );
+      } else if (await exportData()) {
+        addToast(
+          'success',
+          'Data exported successfully. Passwords are excluded.'
+        );
+      }
+    } catch (err: any) {
+      addToast(
+        'error',
+        `Could not ${importing ? 'import' : 'export'} data: ${err?.message || String(err)}`
+      );
+    } finally {
+      transferring = false;
+    }
+  }
 
   onMount(async () => {
     try {
@@ -71,13 +126,50 @@
         Choose where files are saved and how transfer conflicts are handled.
       </p>
     </div>
-    <button class="btn btn-primary" on:click={save} disabled={saving}>
+    <button
+      class="btn btn-primary"
+      on:click={save}
+      disabled={saving || transferring}
+    >
       <Icon name="check" size={16} />
       <span>{saving ? 'Saving...' : 'Save Settings'}</span>
     </button>
   </section>
 
   <div class="settings-container">
+    <div class="card mb-4">
+      <div class="card-header">
+        <div class="card-title-group">
+          <Icon name="folder" size={18} />
+          <div>
+            <h2>Export &amp; Import Data</h2>
+            <p class="text-sm text-muted">
+              Back up connections, projects and saved configuration in a JSON
+              file.
+            </p>
+          </div>
+        </div>
+      </div>
+      <div class="card-body">
+        <p class="text-sm text-muted">
+          Passwords, deployment history and backup files are excluded. After
+          importing on another machine, re-enter passwords and review local
+          paths and build commands. Existing profiles with matching names are
+          kept; saved configuration is replaced.
+        </p>
+        <button
+          class="btn btn-secondary"
+          disabled={transferring || saving}
+          on:click={() => transferData(false)}>Export Data</button
+        >
+        <button
+          class="btn btn-secondary"
+          disabled={transferring || saving}
+          on:click={() => transferData(true)}>Import Data</button
+        >
+        {#if transferring}<p role="status">Processing data…</p>{/if}
+      </div>
+    </div>
     <!-- Section 1: Storage Locations -->
     <div class="card mb-4">
       <div class="card-header">

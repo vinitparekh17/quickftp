@@ -764,3 +764,19 @@ export function getProjectNameById(id: number): string {
   const proj = mockProjects.find((p) => p.id === id);
   return proj?.name ?? `Project #${id}`;
 }
+
+export async function exportData(): Promise<boolean> {
+  if (!isWails)
+    throw new Error('Data export requires the QuickFTP desktop app');
+  return await window.go.main.App.ExportData();
+}
+
+export async function importData(): Promise<{
+  connections: number;
+  projects: number;
+  skipped: number;
+} | null> {
+  if (!isWails)
+    throw new Error('Data import requires the QuickFTP desktop app');
+  return await window.go.main.App.ImportData();
+}
