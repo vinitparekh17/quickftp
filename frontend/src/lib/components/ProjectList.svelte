@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
+  import { transferProfile } from '../profileBackup';
   import { getProjectIcon } from '../icons';
   import { onMount, tick } from 'svelte';
   import type { ProjectDTO } from '../types';
@@ -20,6 +21,17 @@
   let showForm = false;
   let editingProject: ProjectDTO | null = null;
   let loading = true;
+  let transferringProfile = false;
+
+  async function handleProfileTransfer(id?: number) {
+    if (transferringProfile) return;
+    transferringProfile = true;
+    try {
+      await transferProfile('project', loadProjects, id);
+    } finally {
+      transferringProfile = false;
+    }
+  }
 
   let menuProject: ProjectDTO | null = null;
   let menuElement: HTMLDivElement;
@@ -38,7 +50,7 @@
     actionTrigger = event.currentTarget as HTMLButtonElement;
     const rect = actionTrigger.getBoundingClientRect();
     const width = 245,
-      height = 186,
+      height = 224,
       gap = 6;
     const left = Math.max(
       12,
@@ -82,7 +94,9 @@
             buttons.length;
     buttons[next]?.focus();
   }
-  function projectAction(action: 'deploy' | 'history' | 'edit' | 'delete') {
+  function projectAction(
+    action: 'deploy' | 'history' | 'edit' | 'export' | 'delete'
+  ) {
     const project = menuProject;
     closeMenu();
     if (!project) return;
@@ -93,7 +107,10 @@
       $requestedDeploymentId = null;
       $currentPage = 'history';
     } else if (action === 'edit') handleEdit(project);
-    else void handleDelete(project);
+    else if (action === 'export') {
+      actionTrigger?.focus();
+      void handleProfileTransfer(project.id);
+    } else void handleDelete(project);
   }
 
   onMount(async () => {
@@ -173,9 +190,18 @@
         Build commands, output paths, and recent deployment results.
       </p>
     </div>
-    <button class="btn btn-primary" on:click={handleAdd}
-      ><Icon name="plus" size={15} /> Add project</button
-    >
+    <div class="profile-heading-actions">
+      <button
+        class="btn btn-secondary"
+        disabled={transferringProfile || loading}
+        on:click={() => handleProfileTransfer()}
+      >
+        <Icon name="upload" size={15} /> Import project
+      </button>
+      <button class="btn btn-primary" on:click={handleAdd}
+        ><Icon name="plus" size={15} /> Add project</button
+      >
+    </div>
   </section>
   <div class="card page-card resource-list-card">
     {#if loading}<div class="files-state">
@@ -308,6 +334,13 @@
     >
     <button
       role="menuitem"
+      disabled={transferringProfile}
+      on:click={() => projectAction('export')}
+    >
+      <Icon name="download" size={15} /><span>Export project</span>
+    </button>
+    <button
+      role="menuitem"
       class="destructive-action"
       on:click={() => projectAction('delete')}
       ><Icon name="trash" size={15} /><span>Delete project</span></button
@@ -316,6 +349,13 @@
 {/if}
 
 <style>
+  .profile-heading-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
   .project-actions-menu {
     position: fixed;
     z-index: 1100;

@@ -266,3 +266,10 @@ remote/local files and deployment backup contents are excluded. Review imported
 local paths, collision policies and build commands before deploying; importing
 does not execute commands or contact FTP servers. The JSON includes server names,
 usernames and paths, so keep it private.
+
+To move just one profile, use **Export project** in the project’s actions menu
+or the download icon beside a connection. Use **Import project** on the Projects
+page or **Import connection** on the Connections page. These JSON files contain
+only the selected profile. Import keeps an existing profile with the same name.
+Enter the password for a newly imported connection and review paths and build
+commands on a newly imported project.
