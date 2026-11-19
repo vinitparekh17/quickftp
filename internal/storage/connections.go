@@ -27,15 +27,15 @@ type Connection struct {
 	CreatedAt     time.Time
 }
 
-func (db *DB) UpsertConnection(c *Connection) error {
-	tlsVerifyInt := 0
-	if c.TLSVerify {
-		tlsVerifyInt = 1
-	}
+const insertConnection = `INSERT INTO connections (name, host, port, protocol, username, remote_root, tls_verify, cred_target_key)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 
-	query := `
-	INSERT INTO connections (name, host, port, protocol, username, remote_root, tls_verify, cred_target_key)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+func (db *DB) CreateConnection(c *Connection) error {
+	return db.writeConnection(insertConnection, c)
+}
+
+func (db *DB) UpsertConnection(c *Connection) error {
+	return db.writeConnection(insertConnection+`
 	ON CONFLICT(name) DO UPDATE SET
 		host = excluded.host,
 		port = excluded.port,
@@ -43,20 +43,12 @@ func (db *DB) UpsertConnection(c *Connection) error {
 		username = excluded.username,
 		remote_root = excluded.remote_root,
 		tls_verify = excluded.tls_verify,
-		cred_target_key = excluded.cred_target_key
-	RETURNING id, created_at;
-	`
+		cred_target_key = excluded.cred_target_key`, c)
+}
 
-	return db.Conn.QueryRow(
-		query,
-		c.Name,
-		c.Host,
-		c.Port,
-		string(c.Protocol),
-		c.Username,
-		c.RemoteRoot,
-		tlsVerifyInt,
-		c.CredTargetKey,
+func (db *DB) writeConnection(query string, c *Connection) error {
+	return db.Conn.QueryRow(query+` RETURNING id, created_at`,
+		c.Name, c.Host, c.Port, string(c.Protocol), c.Username, c.RemoteRoot, c.TLSVerify, c.CredTargetKey,
 	).Scan(&c.ID, &c.CreatedAt)
 }
 

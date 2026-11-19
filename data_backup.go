@@ -23,6 +23,17 @@ type BackupConnection struct {
 	TLSVerify  bool   `json:"tlsVerify"`
 }
 
+// UnmarshalJSON preserves an explicit opt-out and verifies certificates by default.
+func (c *BackupConnection) UnmarshalJSON(raw []byte) error {
+	type fields BackupConnection
+	value := fields{TLSVerify: true}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	*c = BackupConnection(value)
+	return nil
+}
+
 type DataBackup struct {
 	Format        string             `json:"format"`
 	Version       int                `json:"version"`
@@ -165,7 +176,7 @@ func (a *App) applyBackup(b *DataBackup) (*ImportResult, error) {
 	defer tx.Rollback()
 	result := &ImportResult{}
 	for _, c := range b.Connections {
-		res, e := tx.Exec(`INSERT INTO connections(name,host,port,protocol,username,remote_root,tls_verify,cred_target_key) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(name) DO NOTHING`, c.Name, c.Host, c.Port, c.Protocol, c.Username, c.RemoteRoot, c.TLSVerify, creds.FormatTargetKey(c.Name))
+		res, e := tx.Exec(`INSERT INTO connections(name,host,port,protocol,username,remote_root,tls_verify,cred_target_key) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(name) DO NOTHING`, c.Name, c.Host, c.Port, c.Protocol, c.Username, c.RemoteRoot, c.TLSVerify, creds.NewTargetKey())
 		if e != nil {
 			return nil, fmt.Errorf("import connection: %w", e)
 		}

@@ -23,7 +23,7 @@ func TestDownloadDestination(t *testing.T) {
 			}
 		})
 	}
-	for _, remote := range []string{"/site/assets/../outside", "/site/assets-other/file", "/site/assets/dir\\file"} {
+	for _, remote := range []string{"/site/assets/../outside", "/site/assets-other/file", "/site/assets/log.txt:stream", "/site/assets/CON.txt", "/site/assets/COM¹.txt", "/site/assets/folder./file", "/site/assets/file ", "/site/assets/dir\\file"} {
 		if _, err := downloadDestination(destination, "/site/assets", remote); err == nil {
 			t.Errorf("accepted unsafe remote path %q", remote)
 		}

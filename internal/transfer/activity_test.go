@@ -426,3 +426,39 @@ func TestBulkUploadDoesNotStartIfRecoveryQueueCannotBeSaved(t *testing.T) {
 		t.Fatalf("undurable batch admitted: %v, %+v", err, m.List())
 	}
 }
+
+func TestDownloadRechecksDestinationAfterWaiting(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	nested := filepath.Join(dir, "nested")
+	if err := os.Mkdir(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(dir, "probe")
+	if err := os.Symlink(outside, probe); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	gate := NewGate(1)
+	release, err := gate.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := OpenActivityManager(filepath.Join(dir, "activity.json"), gate)
+	defer m.Close()
+	defer release()
+	client := &activityMock{files: map[string][]byte{"/file.txt": []byte("new")}}
+	job, err := m.AddDownloadWithin(1, "test", "/file.txt", dir, filepath.Join(nested, "file.txt"), 3, "Overwrite", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(nested); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(probe, nested); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	waitStatus(t, m, job.ID, "Failed")
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+		t.Fatalf("wrote outside selected folder: %v, %v", entries, err)
+	}
+}

@@ -600,6 +600,9 @@ func safeRelative(s string) (string, error) {
 		if seg == "" || seg == "." || seg == ".." {
 			return "", fmt.Errorf("unsafe relative path %q", s)
 		}
+		if strings.TrimRight(seg, ". ") != seg || strings.ContainsAny(seg, `<>"|?*`) || strings.ContainsFunc(seg, func(r rune) bool { return r < 32 }) {
+			return "", fmt.Errorf("invalid path segment %q in %q", seg, s)
+		}
 		if isWindowsReservedName(seg) {
 			return "", fmt.Errorf("reserved path segment %q in %q", seg, s)
 		}
@@ -614,11 +617,12 @@ func isWindowsReservedName(seg string) bool {
 	}
 	base := trimmed
 	if dot := strings.IndexByte(base, '.'); dot >= 0 {
-		base = base[:dot]
+		base = strings.TrimRight(base[:dot], " ")
 	}
 	switch strings.ToUpper(base) {
 	case "CON", "PRN", "AUX", "NUL",
 		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³",
 		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
 		return true
 	}

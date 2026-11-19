@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"quickftp/internal/transfer"
+
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -62,7 +64,7 @@ func (a *App) DownloadSelection(connectionID int64, items []DownloadSelectionIte
 		}
 		local, err := downloadDestination(destination, parent, remote)
 		if err == nil {
-			_, err = a.activity.AddDownload(c.ID, c.Name, remote, local, item.Size, settings.DownloadConflict, client)
+			_, err = a.activity.AddDownloadWithin(c.ID, c.Name, remote, destination, local, item.Size, settings.DownloadConflict, client)
 		}
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", item.Path, err))
@@ -79,11 +81,11 @@ func downloadDestination(destination, remoteBase, remote string) (string, error)
 	}
 	clean := path.Clean("/" + remote)
 	if clean == remoteBase {
-		return safeLocalDestination(destination, destination)
+		return transfer.ValidateDownloadDestination(destination, destination)
 	}
 	rel := filepath.FromSlash(strings.TrimPrefix(clean, strings.TrimRight(remoteBase, "/")+"/"))
 	if !filepath.IsLocal(rel) {
 		return "", fmt.Errorf("invalid local download path")
 	}
-	return safeLocalDestination(destination, filepath.Join(destination, rel))
+	return transfer.ValidateDownloadDestination(destination, filepath.Join(destination, rel))
 }

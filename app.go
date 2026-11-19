@@ -302,9 +302,9 @@ func (a *App) GetConnections() ([]ConnectionDTO, error) {
 	return out, nil
 }
 
-// SaveConnection upserts a connection profile and persists the password in the OS credential store.
+// SaveConnection creates or updates a connection profile and persists the password in the OS credential store.
 func (a *App) SaveConnection(dto ConnectionDTO) error {
-	targetKey := creds.FormatTargetKey(dto.Name)
+	var targetKey string
 	if dto.ID > 0 {
 		saved, err := a.connectionByID(dto.ID)
 		if err != nil {
@@ -312,6 +312,8 @@ func (a *App) SaveConnection(dto ConnectionDTO) error {
 		}
 		// Keep the credential identity stable across display-name changes.
 		targetKey = saved.CredTargetKey
+	} else {
+		targetKey = creds.NewTargetKey()
 	}
 	c := &storage.Connection{
 		ID:            dto.ID,
@@ -328,7 +330,7 @@ func (a *App) SaveConnection(dto ConnectionDTO) error {
 	if dto.ID > 0 {
 		saveErr = a.db.UpdateConnection(c)
 	} else {
-		saveErr = a.db.UpsertConnection(c)
+		saveErr = a.db.CreateConnection(c)
 	}
 	if saveErr != nil {
 		return fmt.Errorf("save connection: %w", saveErr)
@@ -581,7 +583,7 @@ func (a *App) QueueDownload(connectionID int64, remotePath, localPath string, si
 	if err = safeExplorerPath(c.RemoteRoot, remotePath); err != nil {
 		return transfer.Activity{}, err
 	}
-	localPath, err = safeLocalDestination(settings.DownloadDir, localPath)
+	localPath, err = transfer.ValidateDownloadDestination(settings.DownloadDir, localPath)
 	if err != nil {
 		return transfer.Activity{}, err
 	}
@@ -590,7 +592,7 @@ func (a *App) QueueDownload(connectionID int64, remotePath, localPath string, si
 	if err != nil {
 		return transfer.Activity{}, err
 	}
-	return a.activity.AddDownload(c.ID, c.Name, remotePath, localPath, size, settings.DownloadConflict, client)
+	return a.activity.AddDownloadWithin(c.ID, c.Name, remotePath, settings.DownloadDir, localPath, size, settings.DownloadConflict, client)
 }
 func (a *App) QueueDownloadDirectory(connectionID int64, remotePath string) ([]transfer.Activity, error) {
 	settings := a.GetSettings()
@@ -645,7 +647,7 @@ func (a *App) queueDownloadTree(c *storage.Connection, client *transfer.FTPClien
 				}
 				continue
 			}
-			job, err := a.activity.AddDownload(c.ID, c.Name, item.Path, local, item.Size, policy, client, batch)
+			job, err := a.activity.AddDownloadWithin(c.ID, c.Name, item.Path, destination, local, item.Size, policy, client, batch)
 			if err != nil {
 				return err
 			}
@@ -885,50 +887,6 @@ func safeExplorerPath(root, p string) error {
 		}
 	}
 	return nil
-}
-func safeLocalDestination(root, dest string) (string, error) {
-	base, e := filepath.Abs(root)
-	if e != nil {
-		return "", e
-	}
-	target, e := filepath.Abs(dest)
-	if e != nil {
-		return "", e
-	}
-	rel, e := filepath.Rel(base, target)
-	if e != nil {
-		return "", e
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("destination is outside the configured download directory")
-	}
-	if e = os.MkdirAll(base, 0700); e != nil {
-		return "", fmt.Errorf("create download directory: %w", e)
-	}
-	rootReal, e := filepath.EvalSymlinks(base)
-	if e != nil {
-		return "", e
-	}
-	probe := target
-	for {
-		if _, e = os.Lstat(probe); e == nil {
-			resolved, re := filepath.EvalSymlinks(probe)
-			if re != nil {
-				return "", re
-			}
-			inside, re := filepath.Rel(rootReal, resolved)
-			if re != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(os.PathSeparator)) {
-				return "", fmt.Errorf("destination resolves outside the configured download directory")
-			}
-			break
-		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			return "", fmt.Errorf("could not resolve destination parent")
-		}
-		probe = parent
-	}
-	return target, nil
 }
 
 func (a *App) GetProjectDeployments(projectID int64, limit int) ([]DeploymentDTO, error) {
