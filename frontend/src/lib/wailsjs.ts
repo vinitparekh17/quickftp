@@ -799,3 +799,11 @@ export async function importProfile(
     throw new Error('Profile import requires the QuickFTP desktop app');
   return await window.go.main.App.ImportProfile(kind);
 }
+
+export async function downloadSelection(
+  connectionId: number,
+  items: { path: string; isDir: boolean; size: number }[]
+): Promise<{ queued: number; errors: string[] | null } | null> {
+  if (!isWails) throw new Error('Transfers require the QuickFTP desktop app');
+  return await window.go.main.App.DownloadSelection(connectionId, items);
+}

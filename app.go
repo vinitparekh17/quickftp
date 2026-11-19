@@ -606,10 +606,11 @@ func (a *App) QueueDownloadDirectory(connectionID int64, remotePath string) ([]t
 	if e != nil {
 		return nil, e
 	}
-	root := path.Clean("/" + c.RemoteRoot)
-	selectedRel := strings.TrimPrefix(strings.TrimPrefix(remotePath, root), "/")
-	selectedDir := filepath.Join(settings.DownloadDir, filepath.FromSlash(selectedRel))
-	selectedDir, e = safeLocalDestination(settings.DownloadDir, selectedDir)
+	return a.queueDownloadTree(c, client, settings.DownloadDir, path.Clean("/"+c.RemoteRoot), remotePath, settings.DownloadConflict)
+}
+
+func (a *App) queueDownloadTree(c *storage.Connection, client *transfer.FTPClient, destination, remoteBase, remotePath, policy string) ([]transfer.Activity, error) {
+	selectedDir, e := downloadDestination(destination, remoteBase, remotePath)
 	if e != nil {
 		return nil, e
 	}
@@ -628,13 +629,14 @@ func (a *App) QueueDownloadDirectory(connectionID int64, remotePath string) ([]t
 			return err
 		}
 		for _, item := range items {
+			if err := safeExplorerPath(remotePath, item.Path); err != nil || path.Dir(path.Clean("/"+item.Path)) != dir {
+				return fmt.Errorf("unsafe path returned by server")
+			}
+			local, err := downloadDestination(destination, remoteBase, item.Path)
+			if err != nil {
+				return err
+			}
 			if item.IsDir {
-				rel := strings.TrimPrefix(strings.TrimPrefix(item.Path, root), "/")
-				local := filepath.Join(settings.DownloadDir, filepath.FromSlash(rel))
-				local, err = safeLocalDestination(settings.DownloadDir, local)
-				if err != nil {
-					return err
-				}
 				if err = os.MkdirAll(local, 0700); err != nil {
 					return err
 				}
@@ -643,16 +645,7 @@ func (a *App) QueueDownloadDirectory(connectionID int64, remotePath string) ([]t
 				}
 				continue
 			}
-			rel := strings.TrimPrefix(strings.TrimPrefix(item.Path, root), "/")
-			if rel == "" || strings.HasPrefix(rel, "../") {
-				return fmt.Errorf("unsafe path returned by server")
-			}
-			local := filepath.Join(settings.DownloadDir, filepath.FromSlash(rel))
-			local, err = safeLocalDestination(settings.DownloadDir, local)
-			if err != nil {
-				return err
-			}
-			job, err := a.activity.AddDownload(c.ID, c.Name, item.Path, local, item.Size, settings.DownloadConflict, client, batch)
+			job, err := a.activity.AddDownload(c.ID, c.Name, item.Path, local, item.Size, policy, client, batch)
 			if err != nil {
 				return err
 			}

@@ -12,13 +12,11 @@
   import {
     getConnections,
     listRemoteDirectory,
-    queueDownload,
+    downloadSelection,
     queueUpload,
     queueUploadDirectory,
-    queueDownloadDirectory,
     selectDirectory,
     selectFiles,
-    getSettings,
     deleteRemoteEntries,
   } from '../wailsjs';
   import type { ConnectionDTO, RemoteFileDTO } from '../types';
@@ -34,7 +32,7 @@
   let selected: string[] = [];
   let anchor = -1;
   let focusIndex = -1;
-  let downloadDir = '';
+  let downloading = false;
   let rows: HTMLElement;
   let pathInput = '';
   let back: string[] = [];
@@ -66,7 +64,6 @@
           : $connections[0]
             ? String($connections[0].id)
             : '';
-      downloadDir = (await getSettings()).downloadDir;
     } catch (e: any) {
       error = e.message;
     }
@@ -214,37 +211,32 @@
       selected = [];
     }
   }
-  function localDestination(remote: string) {
-    if (!connection) return '';
-    const root = (connection.remoteRoot || '/').replace(/\/$/, '');
-    const rel = remote.startsWith(root + '/')
-      ? remote.slice(root.length + 1)
-      : remote.split('/').pop() || 'file';
-    return `${downloadDir.replace(/[\\/]$/, '')}\\${rel.replaceAll('/', '\\')}`;
-  }
-  async function download(paths = selected) {
-    let count = 0;
-    for (const p of paths) {
-      const f = entries.find((x) => x.path === p);
-      if (!f) continue;
-      try {
-        if (f.isDir) {
-          const jobs = await queueDownloadDirectory(Number(connectionId), p);
-          count += jobs.length;
-        } else {
-          await queueDownload(
-            Number(connectionId),
-            p,
-            localDestination(p),
-            f.sizeKnown ? f.size : 0
-          );
-          count++;
-        }
-      } catch (e: any) {
-        addToast('error', `Could not queue ${p}: ${e.message}`);
-      }
+  async function download() {
+    if (!connection || downloading || deleting) return;
+    const items = entries
+      .filter((entry) => selected.includes(entry.path))
+      .map(({ path, isDir, sizeKnown, size }) => ({
+        path,
+        isDir,
+        size: sizeKnown ? size : 0,
+      }));
+    if (!items.length) return;
+    downloading = true;
+    try {
+      const result = await downloadSelection(connection.id, items);
+      if (!result) return;
+      for (const error of result.errors ?? [])
+        addToast('error', `Could not queue ${error}`);
+      if (result.queued > 0)
+        addToast('info', `${result.queued} file(s) queued for download`);
+    } catch (error: any) {
+      addToast(
+        'error',
+        `Could not queue download: ${error?.message || String(error)}`
+      );
+    } finally {
+      downloading = false;
     }
-    if (count > 0) addToast('info', `${count} file(s) queued for download`);
   }
   async function deleteSelected() {
     if (!connection || !selected.length || deleting) return;
@@ -435,8 +427,8 @@
         ><Icon name="upload" size={14} /> Upload folder</button
       ><button
         class="btn btn-primary btn-sm"
-        on:click={() => download()}
-        disabled={!selected.length || deleting}
+        on:click={download}
+        disabled={!selected.length || deleting || downloading}
         ><Icon name="download" size={14} /> Download</button
       ><button
         class="btn btn-danger btn-sm"
