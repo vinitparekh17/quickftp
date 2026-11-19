@@ -19,7 +19,7 @@
   });
 
   async function handleRollbackFirst() {
-    if ($pendingDeployments.length === 0) return;
+    if (!$pendingDeployments[0]?.backupDir) return;
     const dep = $pendingDeployments[0];
     const connName = getConnectionNameById(dep.connectionId);
     if (
@@ -62,16 +62,18 @@
         <Icon name="history" size={14} />
         View in History
       </button>
-      <button
-        class="btn btn-danger btn-sm"
-        on:click={handleRollbackFirst}
-        disabled={rollingBack}
-      >
-        <Icon name="rollback" size={14} />
-        {rollingBack
-          ? 'Rolling back...'
-          : `Rollback #${$pendingDeployments[0].id}`}
-      </button>
+      {#if $pendingDeployments[0].backupDir}
+        <button
+          class="btn btn-danger btn-sm"
+          on:click={handleRollbackFirst}
+          disabled={rollingBack}
+        >
+          <Icon name="rollback" size={14} />
+          {rollingBack
+            ? 'Rolling back...'
+            : `Rollback #${$pendingDeployments[0].id}`}
+        </button>
+      {/if}
     </div>
   </div>
 {/if}

@@ -136,6 +136,19 @@ Navigate to the **Projects** tab:
   }
   ```
 
+Exclude patterns are relative to the build output and remote deployment root. A
+literal folder such as `media` or `assets/` excludes its contents too. Excluded
+paths are kept on the server during deployment.
+
+Choose a backup mode when starting a deployment:
+
+- **Backup everything** (default) copies all remote files, including excluded paths.
+- **Without backup** creates no local snapshot, keeps stale files, and disables
+  rollback. Replacing an existing file requires the FTP server to support
+  renaming over that file.
+- **Backup without excluded files** skips paths matched by the project’s exclude
+  patterns. Other backups and stale cleanup work as usual.
+
 Use **Projects → project → Deployments → run** for saved build/transfer logs and that run’s file journal. Deployment records are created before building, so build failures also retain a run ID and diagnostics. Historical text logs are paginated and can be cleared per run or all at once; clearing text logs does not remove deployment records, rollback journals, or backups.
 
 Manual file operations follow **Connections → connection → Transfers → batch → files**. Activity is a shortcut to this connection-scoped history and the application log. **Clear finished transfer history** removes only terminal entries for the selected connection (or all connections from the overview), preserving queued, running, and conflict-waiting work. Older records without batch IDs remain in recovered groups. File details and journals load on demand in pages of 50.

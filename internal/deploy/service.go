@@ -25,6 +25,7 @@ type Service struct {
 }
 
 type Options struct {
+	BackupMode       transfer.BackupMode
 	IISOfflinePage   string
 	IISShutdownDelay time.Duration
 }
@@ -46,6 +47,10 @@ func (s *Service) DeployProject(ctx context.Context, projectName, connectionName
 		return 0, fmt.Errorf("read connection credential: %w", err)
 	}
 	handler, err := projecthandler.ForType(project.Type)
+	if err != nil {
+		return 0, err
+	}
+	excluded, err := projecthandler.ArtifactExcluder(project.ArtifactRulesJSON)
 	if err != nil {
 		return 0, err
 	}
@@ -87,7 +92,7 @@ func (s *Service) DeployProject(ctx context.Context, projectName, connectionName
 	if s.PhaseLog != nil {
 		s.PhaseLog("planning")
 	}
-	engine := transfer.Engine{DB: s.DB, StartedDeploymentID: deploymentID, Client: client, RemoteRoot: connection.RemoteRoot, BackupRoot: backupRoot, IISOfflinePage: opts.IISOfflinePage, IISShutdownDelay: opts.IISShutdownDelay, OnPhase: s.PhaseLog, OnLog: s.TransferLog, Gate: s.Gate, ConnectionID: connection.ID, ConnectionName: connection.Name, OnFileTransfer: s.TransferFile}
+	engine := transfer.Engine{DB: s.DB, StartedDeploymentID: deploymentID, Client: client, RemoteRoot: connection.RemoteRoot, BackupRoot: backupRoot, BackupMode: opts.BackupMode, Excluded: excluded, IISOfflinePage: opts.IISOfflinePage, IISShutdownDelay: opts.IISShutdownDelay, OnPhase: s.PhaseLog, OnLog: s.TransferLog, Gate: s.Gate, ConnectionID: connection.ID, ConnectionName: connection.Name, OnFileTransfer: s.TransferFile}
 	_, err = engine.Deploy(ctx, project.ID, connection.ID, selected)
 	return deploymentID, err
 }

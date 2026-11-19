@@ -87,8 +87,9 @@ type DeploymentFileDTO struct {
 
 // DeployOptions carries optional settings the frontend passes to StartDeploy.
 type DeployOptions struct {
-	IISOfflinePage   string `json:"iisOfflinePage"`
-	IISShutdownDelay int    `json:"iisShutdownDelay"` // milliseconds
+	BackupMode       transfer.BackupMode `json:"backupMode"`
+	IISOfflinePage   string              `json:"iisOfflinePage"`
+	IISShutdownDelay int                 `json:"iisShutdownDelay"` // milliseconds
 }
 
 type SettingsDTO struct {
@@ -481,6 +482,7 @@ func (a *App) StartDeploy(projectName, connectionName string, opts DeployOptions
 	}
 
 	deployOpts := deploy.Options{
+		BackupMode:       opts.BackupMode,
 		IISOfflinePage:   opts.IISOfflinePage,
 		IISShutdownDelay: time.Duration(opts.IISShutdownDelay) * time.Millisecond,
 	}

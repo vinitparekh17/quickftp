@@ -2,7 +2,7 @@
   import { createEventDispatcher, onMount } from 'svelte';
   import Icon from '../Icon.svelte';
   import { getProjectIcon } from '../../icons';
-  import type { ProjectDTO, ConnectionDTO } from '../../types';
+  import type { ProjectDTO, ConnectionDTO, DeployOptions } from '../../types';
   import { deployStatus, addToast } from '../../stores';
   import { startDeploy } from '../../wailsjs';
 
@@ -22,6 +22,7 @@
     initialConnectionName ||
     (connections.length > 0 ? connections[0].name : '');
 
+  let backupMode: NonNullable<DeployOptions['backupMode']> = 'all';
   let enableIISOffline = false;
   let iisShutdownDelay = 1500;
   let iisOfflineHtml =
@@ -77,6 +78,7 @@
     isSubmitting = true;
     try {
       await startDeploy(selectedProject, selectedConnection, {
+        backupMode,
         iisOfflinePage:
           activeProject?.projectType === 'dotnet' && enableIISOffline
             ? iisOfflineHtml
@@ -227,6 +229,36 @@
         </div>
       {/if}
 
+      <div class="deploy-flow-step">
+        <div class="form-group mb-0">
+          <label class="form-label" for="new-deploy-backup">Backup mode</label>
+          <select
+            id="new-deploy-backup"
+            class="form-select"
+            bind:value={backupMode}
+            disabled={isSubmitting}
+          >
+            <option value="all">Backup everything (default)</option>
+            <option value="none">Without backup</option>
+            <option value="without_excluded"
+              >Backup without excluded files</option
+            >
+          </select>
+          <p class="form-hint">
+            {#if backupMode === 'none'}
+              Keeps stale files. Rollback is unavailable, and replacing files
+              requires server support for renaming over existing files.
+            {:else if backupMode === 'without_excluded'}
+              Files matching the project’s exclude patterns are left in place
+              and skipped during backup.
+            {:else}
+              Copies all remote files, including excluded paths. Excluded files
+              are left in place during deployment.
+            {/if}
+          </p>
+        </div>
+      </div>
+
       <!-- Section 3: IIS Maintenance Mode Option (Optional) -->
       {#if activeProject?.projectType === 'dotnet'}
         <details class="deploy-flow-step modal-optional-details">
@@ -294,8 +326,8 @@
             <li>
               <span class="step-bullet">1</span>
               <span
-                ><strong>Pre-flight Backup:</strong> Current remote files are downloaded
-                to an isolated local snapshot directory before remote modification.</span
+                ><strong>Pre-flight Backup:</strong> The selected backup mode determines
+                which remote files are copied to the local snapshot before deployment.</span
               >
             </li>
             <li>

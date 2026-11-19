@@ -3,21 +3,24 @@ package transfer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"quickftp/internal/storage"
 )
 
 type memoryFTP struct {
-	files                map[string][]byte
-	events               []string
-	failUpload           bool
-	failUploadAfterWrite bool
+	files                 map[string][]byte
+	events                []string
+	failUpload            bool
+	failUploadAfterWrite  bool
+	rejectRenameOverwrite bool
 }
 
 func (m *memoryFTP) List(_ context.Context, root string) ([]RemoteFile, error) {
@@ -56,6 +59,9 @@ func (m *memoryFTP) Rename(_ context.Context, a, b string) error {
 	v, ok := m.files[a]
 	if !ok {
 		return ErrNotFound
+	}
+	if _, exists := m.files[b]; exists && m.rejectRenameOverwrite {
+		return errors.New("server refuses rename over existing file")
 	}
 	m.files[b] = v
 	delete(m.files, a)
@@ -221,5 +227,79 @@ func TestSafeRelativeRejectsTraversal(t *testing.T) {
 	}
 	if got, err := safeRelative("assets/app.js"); err != nil || got != path.Clean("assets/app.js") {
 		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+func TestDeploymentBackupModesProtectExcludedFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mode        BackupMode
+		wantBackups int
+		keepStale   bool
+	}{
+		{"default backs up excluded paths", "", 4, false},
+		{"omits excluded backups", BackupWithoutExcluded, 2, false},
+		{"no snapshot or stale deletes", WithoutBackup, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, ftp, project, conn := testEngine(t, map[string][]byte{
+				"/site/index.html":            []byte("old index"),
+				"/site/assets/icons/logo.png": []byte("keep me"),
+				"/site/media/upload.jpg":      []byte("keep image"),
+				"/site/stale.js":              []byte("stale"),
+			})
+			e.BackupMode = tc.mode
+			e.Excluded = func(rel string) (bool, error) {
+				return strings.HasPrefix(rel, "media/") || strings.HasPrefix(rel, "assets/"), nil
+			}
+			local := filepath.Join(t.TempDir(), "index.html")
+			if err := os.WriteFile(local, []byte("new index"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			id, err := e.Deploy(context.Background(), project, conn, []Artifact{{LocalPath: local, RelativePath: "index.html"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(ftp.files["/site/assets/icons/logo.png"]) != "keep me" || string(ftp.files["/site/media/upload.jpg"]) != "keep image" {
+				t.Fatal("deployment modified excluded files")
+			}
+			if string(ftp.files["/site/index.html"]) != "new index" {
+				t.Fatal("index was not deployed")
+			}
+			if _, ok := ftp.files["/site/stale.js"]; ok != tc.keepStale {
+				t.Fatal("unexpected stale-file handling")
+			}
+			files, err := e.DB.GetDeploymentFiles(id, "backup")
+			if err != nil || len(files) != tc.wantBackups {
+				t.Fatalf("got %d backups, want %d: %v", len(files), tc.wantBackups, err)
+			}
+			run, err := e.DB.GetDeployment(id)
+			if err != nil || (run.BackupDir == "") != tc.keepStale {
+				t.Fatalf("unexpected backup directory: %+v, %v", run, err)
+			}
+		})
+	}
+}
+
+func TestWithoutBackupKeepsOriginalIfServerRejectsOverwrite(t *testing.T) {
+	e, ftp, project, conn := testEngine(t, map[string][]byte{"/site/index.html": []byte("old index")})
+	e.BackupMode = WithoutBackup
+	ftp.rejectRenameOverwrite = true
+	local := filepath.Join(t.TempDir(), "index.html")
+	if err := os.WriteFile(local, []byte("new index"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	id, err := e.Deploy(context.Background(), project, conn, []Artifact{{LocalPath: local, RelativePath: "index.html"}})
+	if err == nil || !strings.Contains(err.Error(), "server must allow rename") {
+		t.Fatalf("expected an actionable overwrite error: %v", err)
+	}
+	if string(ftp.files["/site/index.html"]) != "old index" {
+		t.Fatal("original file was changed")
+	}
+	if err := e.Rollback(context.Background(), id); err == nil || !strings.Contains(err.Error(), "no backup") {
+		t.Fatalf("rollback was not blocked: %v", err)
+	}
+	if string(ftp.files["/site/index.html"]) != "old index" {
+		t.Fatal("rollback removed the original")
 	}
 }

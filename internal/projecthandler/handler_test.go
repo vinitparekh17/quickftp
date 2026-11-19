@@ -89,3 +89,33 @@ func TestLineWriterFlushesOversizedUnterminatedLine(t *testing.T) {
 		t.Fatal("oversized final line was not truncated")
 	}
 }
+
+func TestArtifactExcludeMatchesDirectoryContents(t *testing.T) {
+	raw := `{"exclude":["assets\\","media","*.map"]}`
+	excluded, err := ArtifactExcluder(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := parseArtifactRules(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		rel  string
+		want bool
+	}{
+		{"assets/img/icons/logo.svg", true},
+		{"media/user/banner.jpg", true},
+		{"media", true},
+		{"main.js.map", true},
+		{"assets-old/logo.svg", false},
+		{"medialibrary/banner.jpg", false},
+		{"index.html", false},
+	} {
+		got, err := excluded(tc.rel)
+		upload, uploadErr := matchesRules(tc.rel, rules)
+		if err != nil || uploadErr != nil || got != tc.want || upload == tc.want {
+			t.Errorf("%s: excluded=%v, upload=%v, want excluded=%v, errors=%v/%v", tc.rel, got, upload, tc.want, err, uploadErr)
+		}
+	}
+}
