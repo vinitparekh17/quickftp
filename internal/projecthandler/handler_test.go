@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -55,5 +57,35 @@ func TestBuildLogsAreForwarded(t *testing.T) {
 	}
 	if len(lines) == 0 {
 		t.Fatal("expected build output to be forwarded")
+	}
+}
+
+func TestLineWriterBoundsOversizedLines(t *testing.T) {
+	var lines []string
+	w := lineWriter{stream: "stdout", log: func(_ string, line string) { lines = append(lines, line) }}
+	prefix := strings.Repeat("x", maxBuildLogLineBytes-1)
+	for _, part := range []string{prefix + "é", strings.Repeat("x", maxBuildLogLineBytes*2), "\r\nnext\r", "\n\nunterminated"} {
+		n, err := w.Write([]byte(part))
+		if err != nil || n != len(part) {
+			t.Fatalf("write accepted %d of %d bytes: %v", n, len(part), err)
+		}
+		if len(w.pending) > maxBuildLogLineBytes+1 {
+			t.Fatalf("pending buffer grew to %d bytes", len(w.pending))
+		}
+	}
+	w.flush()
+	want := []string{prefix + " [line truncated]", "next", "", "unterminated"}
+	if !slices.Equal(lines, want) {
+		t.Fatalf("unexpected lines after truncation: got %d lines", len(lines))
+	}
+}
+
+func TestLineWriterFlushesOversizedUnterminatedLine(t *testing.T) {
+	var line string
+	w := lineWriter{log: func(_, value string) { line = value }}
+	w.Write([]byte(strings.Repeat("Z", maxBuildLogLineBytes+2)))
+	w.flush()
+	if line != strings.Repeat("Z", maxBuildLogLineBytes)+" [line truncated]" {
+		t.Fatal("oversized final line was not truncated")
 	}
 }
