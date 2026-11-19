@@ -2,6 +2,7 @@
 package projecthandler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 type Project struct{ Type, LocalPath, BuildCommand, OutputRelPath, ArtifactRulesJSON string }
@@ -209,34 +211,69 @@ func streamLogs(cmd *exec.Cmd, log LogFunc) {
 	cmd.Stderr = &lineWriter{stream: "stderr", log: safeLog}
 }
 
+// Limit each log record so tools emitting an oversized line cannot grow the
+// pending buffer indefinitely or flood the UI with fragments of one line.
+const maxBuildLogLineBytes = 64 * 1024
+
 type lineWriter struct {
-	mu      sync.Mutex
-	stream  string
-	log     LogFunc
-	pending string
+	mu        sync.Mutex
+	stream    string
+	log       LogFunc
+	pending   []byte
+	truncated bool
 }
 
 func (w *lineWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	n := len(p)
-	w.pending += string(p)
-	for {
-		i := strings.IndexByte(w.pending, '\n')
-		if i < 0 {
+	for len(p) > 0 {
+		end := bytes.IndexByte(p, '\n')
+		if end < 0 {
+			w.appendLineBytes(p)
 			break
 		}
-		line := strings.TrimSuffix(w.pending[:i], "\r")
-		w.log(w.stream, line)
-		w.pending = w.pending[i+1:]
+		w.appendLineBytes(p[:end])
+		w.emitLine(true)
+		p = p[end+1:]
 	}
 	return n, nil
 }
+
+func (w *lineWriter) appendLineBytes(p []byte) {
+	// Allow an extra byte for a possible CR in a CRLF line ending.
+	remaining := maxBuildLogLineBytes + 1 - len(w.pending)
+	if len(p) > remaining {
+		w.truncated = true
+		p = p[:remaining]
+	}
+	w.pending = append(w.pending, p...)
+}
+
+func (w *lineWriter) emitLine(terminated bool) {
+	line := w.pending
+	if terminated && !w.truncated {
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+	}
+	if w.truncated || len(line) > maxBuildLogLineBytes {
+		// Avoid cutting a UTF-8 rune at the limit. Invalid input bytes inside
+		// the line are left to the log transport, as with ordinary lines.
+		end := maxBuildLogLineBytes
+		for end > 0 && !utf8.RuneStart(line[end]) {
+			end--
+		}
+		w.log(w.stream, string(line[:end])+" [line truncated]")
+	} else {
+		w.log(w.stream, string(line))
+	}
+	w.pending = w.pending[:0]
+	w.truncated = false
+}
+
 func (w *lineWriter) flush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.pending != "" {
-		w.log(w.stream, w.pending)
-		w.pending = ""
+	if len(w.pending) != 0 {
+		w.emitLine(false)
 	}
 }
