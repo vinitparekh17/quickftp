@@ -462,3 +462,102 @@ func TestDownloadRechecksDestinationAfterWaiting(t *testing.T) {
 		t.Fatalf("wrote outside selected folder: %v, %v", entries, err)
 	}
 }
+
+func TestDownloadWorkersLeaveRoomForWorkBehindConflicts(t *testing.T) {
+	dir := t.TempDir()
+	m := OpenActivityManager(filepath.Join(dir, "queue.json"), NewGate(1))
+	defer m.Close()
+	client := &activityMock{files: map[string][]byte{"/file.txt": []byte("new")}}
+	var requests []DownloadRequest
+	for i := range maxDownloadWorkers * 2 {
+		local := filepath.Join(dir, fmt.Sprintf("existing-%d.txt", i))
+		if err := os.WriteFile(local, []byte("original"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, DownloadRequest{RemotePath: "/file.txt", LocalPath: local, Size: 3})
+	}
+	requests = append(requests, DownloadRequest{RemotePath: "/file.txt", LocalPath: filepath.Join(dir, "fresh.txt"), Size: 3})
+	jobs, err := m.AddDownloadsWithin(1, "test", dir, requests, "Ask", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, m, jobs[len(jobs)-1].ID, "Completed")
+	for _, job := range jobs[:len(jobs)-1] {
+		waitStatus(t, m, job.ID, "Waiting")
+	}
+	if err := m.ResolveConflict(jobs[0].ID, "Overwrite"); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, m, jobs[0].ID, "Completed")
+	if err := m.Cancel(jobs[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, m, jobs[1].ID, "Cancelled")
+}
+
+func TestDownloadWorkerLimitAndQueuedCancellation(t *testing.T) {
+	dir := t.TempDir()
+	gate := NewGate(1)
+	release, err := gate.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	m := OpenActivityManager(filepath.Join(dir, "queue.json"), gate)
+	defer m.Close()
+	client := &activityMock{files: map[string][]byte{"/file.txt": []byte("new")}}
+	var requests []DownloadRequest
+	for i := range maxDownloadWorkers * 3 {
+		requests = append(requests, DownloadRequest{RemotePath: "/file.txt", LocalPath: filepath.Join(dir, fmt.Sprintf("%d.txt", i)), Size: 3})
+	}
+	jobs, err := m.AddDownloadsWithin(1, "test", dir, requests, "Skip", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	workers, pending := m.downloadWorkers, m.downloadQueue.Len()
+	m.mu.Unlock()
+	if workers != maxDownloadWorkers || pending < len(jobs)-workers {
+		t.Fatalf("expected bounded queue, got %d workers and %d pending", workers, pending)
+	}
+	last := jobs[len(jobs)-1]
+	if err := m.Cancel(last.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, m, last.ID, "Cancelled")
+	if _, err := os.Stat(last.LocalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cancelled download created a file: %v", err)
+	}
+}
+
+func TestProgressCountersThrottleLargeChunks(t *testing.T) {
+	data := make([]byte, 1024*1024)
+	for _, tc := range []struct {
+		name string
+		run  func(time.Time, func(int64)) (int64, error)
+	}{
+		{"upload", func(last time.Time, report func(int64)) (int64, error) {
+			r := countReader{r: bytes.NewReader(data), lastAt: last, update: report}
+			_, err := r.Read(make([]byte, len(data)))
+			return r.n, err
+		}},
+		{"download", func(last time.Time, report func(int64)) (int64, error) {
+			w := countWriter{w: io.Discard, lastAt: last, update: report}
+			_, err := w.Write(data)
+			return w.n, err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reported int64
+			report := func(n int64) { reported = n }
+			total, err := tc.run(time.Now(), report)
+			if err != nil || total != int64(len(data)) || reported != 0 {
+				t.Fatalf("unexpected progress during throttle window: total %d, reported %d, error %v", total, reported, err)
+			}
+			total, err = tc.run(time.Now().Add(-time.Second), report)
+			if err != nil || reported != total {
+				t.Fatalf("progress was not delivered after the throttle window: total %d, reported %d, error %v", total, reported, err)
+			}
+		})
+	}
+}
