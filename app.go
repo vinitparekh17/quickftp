@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -620,7 +621,7 @@ func (a *App) queueDownloadTree(c *storage.Connection, client *transfer.FTPClien
 		return nil, e
 	}
 	batch := transfer.NewTransferBatch(path.Base(remotePath))
-	queued := []transfer.Activity{}
+	var requests []transfer.DownloadRequest
 	var walk func(string, int) error
 	walk = func(dir string, depth int) error {
 		if depth > 64 {
@@ -647,18 +648,13 @@ func (a *App) queueDownloadTree(c *storage.Connection, client *transfer.FTPClien
 				}
 				continue
 			}
-			job, err := a.activity.AddDownloadWithin(c.ID, c.Name, item.Path, destination, local, item.Size, policy, client, batch)
-			if err != nil {
-				return err
-			}
-			queued = append(queued, job)
+			requests = append(requests, transfer.DownloadRequest{RemotePath: item.Path, LocalPath: local, Size: item.Size})
 		}
 		return nil
 	}
-	if e = walk(remotePath, 0); e != nil {
-		return queued, e
-	}
-	return queued, nil
+	walkErr := walk(remotePath, 0)
+	queued, queueErr := a.activity.AddDownloadsWithin(c.ID, c.Name, destination, requests, policy, client, batch)
+	return queued, errors.Join(walkErr, queueErr)
 }
 func (a *App) QueueUpload(connectionID int64, localPath, remotePath string) (transfer.Activity, error) {
 	settings := a.GetSettings()

@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -76,18 +77,21 @@ type ActivityClient interface {
 }
 
 type ActivityManager struct {
-	mu            sync.Mutex
-	workers       sync.WaitGroup
-	closed        bool
-	path          string
-	entries       []Activity
-	clients       map[string]ActivityClient
-	cancels       map[string]context.CancelFunc
-	conflicts     map[string]chan string
-	Gate          *Gate
-	OnChange      func(Activity)
-	OnBatchChange func([]Activity)
-	OnLog         func(string, string)
+	mu              sync.Mutex
+	workers         sync.WaitGroup
+	closed          bool
+	path            string
+	entries         []Activity
+	clients         map[string]ActivityClient
+	cancels         map[string]context.CancelFunc
+	conflicts       map[string]chan string
+	downloads       map[string]*downloadJob
+	downloadQueue   list.List
+	downloadWorkers int
+	Gate            *Gate
+	OnChange        func(Activity)
+	OnBatchChange   func([]Activity)
+	OnLog           func(string, string)
 }
 
 func OpenActivityManager(file string, gate *Gate) *ActivityManager {
@@ -98,6 +102,7 @@ func OpenActivityManager(file string, gate *Gate) *ActivityManager {
 		clients:   make(map[string]ActivityClient),
 		cancels:   make(map[string]context.CancelFunc),
 		conflicts: make(map[string]chan string),
+		downloads: make(map[string]*downloadJob),
 	}
 	data, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
@@ -232,52 +237,98 @@ func (m *ActivityManager) AddDownload(connID int64, connName, remote, local stri
 }
 
 func (m *ActivityManager) AddDownloadWithin(connID int64, connName, remote, root, local string, size int64, policy string, client ActivityClient, batch ...TransferBatch) (Activity, error) {
-	if err := safeRemotePath(remote); err != nil {
+	entries, err := m.AddDownloadsWithin(connID, connName, root, []DownloadRequest{{RemotePath: remote, LocalPath: local, Size: size}}, policy, client, batch...)
+	if err != nil {
 		return Activity{}, err
+	}
+	return entries[0], nil
+}
+
+type DownloadRequest struct {
+	RemotePath, LocalPath string
+	Size                  int64
+}
+
+// AddDownloadsWithin persists all files in a directory selection before starting workers.
+func (m *ActivityManager) AddDownloadsWithin(connID int64, connName, root string, requests []DownloadRequest, policy string, client ActivityClient, batch ...TransferBatch) ([]Activity, error) {
+	if len(requests) == 0 {
+		return nil, nil
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {
-		return Activity{}, err
+		return nil, err
 	}
-	local, err = ValidateDownloadDestination(root, local)
-	if err != nil {
-		return Activity{}, err
+	entries := make([]Activity, 0, len(requests))
+	for _, request := range requests {
+		if err := safeRemotePath(request.RemotePath); err != nil {
+			return nil, err
+		}
+		local, err := ValidateDownloadDestination(root, request.LocalPath)
+		if err != nil {
+			return nil, err
+		}
+		a := Activity{
+			ID:             nextActivityID(connID),
+			Direction:      "Download",
+			ConnectionID:   connID,
+			ConnectionName: connName,
+			RemotePath:     path.Clean("/" + request.RemotePath),
+			LocalPath:      local,
+			DownloadRoot:   root,
+			Status:         "Queued",
+			Total:          request.Size,
+			StartedAt:      time.Now(),
+			ConflictPolicy: policy,
+		}
+		applyTransferBatch(&a, batch)
+		if c, ok := client.(*FTPClient); ok {
+			a.Profile = snapshotProfile(c.Config)
+		}
+		entries = append(entries, a)
 	}
-	id := nextActivityID(connID)
-	a := Activity{
-		ID:             id,
-		Direction:      "Download",
-		ConnectionID:   connID,
-		ConnectionName: connName,
-		RemotePath:     path.Clean("/" + remote),
-		LocalPath:      local,
-		DownloadRoot:   root,
-		Status:         "Queued",
-		Total:          size,
-		StartedAt:      time.Now(),
-		ConflictPolicy: policy,
-	}
-	applyTransferBatch(&a, batch)
-	if c, ok := client.(*FTPClient); ok {
-		a.Profile = snapshotProfile(c.Config)
-	}
+
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		return Activity{}, errors.New("transfer manager is closed")
+		return nil, errors.New("transfer manager is closed")
 	}
-	m.workers.Add(1)
-	m.prependEntryLocked(a)
-	m.clients[id] = client
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancels[id] = cancel
-	m.persistLocked()
+	previous := m.entries
+	all := make([]Activity, 0, len(entries)+len(previous))
+	for i := len(entries) - 1; i >= 0; i-- {
+		all = append(all, entries[i])
+	}
+	m.entries = append(all, previous...)
+	if err := m.persistLocked(); err != nil {
+		m.entries = previous
+		m.mu.Unlock()
+		return nil, fmt.Errorf("save download queue: %w", err)
+	}
+	m.pruneHistoryLocked()
+	for _, entry := range entries {
+		ctx, cancel := context.WithCancel(context.Background())
+		m.cancels[entry.ID] = cancel
+		m.clients[entry.ID] = client
+		m.downloads[entry.ID] = &downloadJob{activity: entry, ctx: ctx}
+	}
 	m.mu.Unlock()
-	if m.OnChange != nil {
-		m.OnChange(a)
+
+	if len(entries) > 1 && m.OnBatchChange != nil {
+		m.OnBatchChange(entries)
+	} else if m.OnChange != nil {
+		for _, entry := range entries {
+			m.OnChange(entry)
+		}
 	}
-	go m.runDownload(ctx, a)
-	return a, nil
+	m.mu.Lock()
+	if !m.closed {
+		for _, entry := range entries {
+			if job := m.downloads[entry.ID]; job != nil {
+				m.scheduleDownloadLocked(job)
+			}
+		}
+	}
+	m.mu.Unlock()
+	return entries, nil
 }
 
 func prepareUpload(connID int64, connName, remote, local, policy string, client ActivityClient, batch ...TransferBatch) (Activity, error) {
@@ -608,47 +659,41 @@ func (m *ActivityManager) runUpload(ctx context.Context, a Activity) {
 	m.finish(a.ID, "Completed", nil)
 }
 
-func (m *ActivityManager) runDownload(ctx context.Context, a Activity) {
-	defer m.workers.Done()
-	m.mu.Lock()
-	client := m.clients[a.ID]
-	m.mu.Unlock()
+func (m *ActivityManager) runDownload(job *downloadJob, client ActivityClient) {
+	ctx, a := job.ctx, job.activity
+	if err := ctx.Err(); err != nil {
+		m.finish(a.ID, "Cancelled", err)
+		return
+	}
 	if client == nil {
 		m.finish(a.ID, "Failed", errors.New("transfer connection unavailable"))
 		return
 	}
-	defer m.releaseClient(a.ID, client)
-
 	if _, err := ValidateDownloadDestination(a.DownloadRoot, a.LocalPath); err != nil {
 		m.finish(a.ID, "Failed", err)
 		return
 	}
-	policy := a.ConflictPolicy
+	policy := job.policy
+	if policy == "" {
+		policy = a.ConflictPolicy
+	}
 	if policy == "" {
 		policy = "Ask"
 	}
-	exists := false
-	if _, err := os.Lstat(a.LocalPath); err == nil {
-		exists = true
-		if policy == "Ask" {
-			ch := make(chan string, 1)
-			m.mu.Lock()
-			m.conflicts[a.ID] = ch
-			m.mu.Unlock()
-			m.update(a.ID, true, func(x *Activity) {
-				x.Status = "Waiting"
-				x.Error = "Destination already exists"
-			})
-			m.log("CONFLICT", a.RemotePath+" → "+a.LocalPath)
-			select {
-			case policy = <-ch:
-			case <-ctx.Done():
-				m.finish(a.ID, "Cancelled", ctx.Err())
-				return
-			}
-		}
+	_, statErr := os.Lstat(a.LocalPath)
+	exists := statErr == nil
+	if exists && policy == "Ask" {
+		m.mu.Lock()
+		job.waiting = true
+		m.mu.Unlock()
+		m.update(a.ID, true, func(x *Activity) {
+			x.Status = "Waiting"
+			x.Error = "Destination already exists"
+		})
+		m.log("CONFLICT", a.RemotePath+" → "+a.LocalPath)
+		return
 	}
-	if exists && policy == "Skip" {
+	if policy == "Skip" && (exists || job.policy != "") {
 		m.finish(a.ID, "Skipped", nil)
 		return
 	}
@@ -663,7 +708,10 @@ func (m *ActivityManager) runDownload(ctx context.Context, a Activity) {
 	}
 	defer release()
 
-	m.update(a.ID, true, func(x *Activity) { x.Status = "Running" })
+	m.update(a.ID, true, func(x *Activity) {
+		x.Status = "Running"
+		x.Error = ""
+	})
 	target := a.LocalPath
 	if policy == "Rename" {
 		target = uniqueLocalName(target)
@@ -778,6 +826,7 @@ func (m *ActivityManager) finish(id, status string, err error) {
 	}
 	delete(m.clients, id)
 	delete(m.conflicts, id)
+	delete(m.downloads, id)
 	m.pruneHistoryLocked()
 	if !m.closed {
 		m.persistLocked()
@@ -841,7 +890,16 @@ func (m *ActivityManager) Close() {
 	for _, cancel := range m.cancels {
 		cancel()
 	}
+	var pending []string
+	for id := range m.downloads {
+		if m.removePendingDownloadLocked(id) {
+			pending = append(pending, id)
+		}
+	}
 	m.mu.Unlock()
+	for _, id := range pending {
+		m.cancelPendingDownload(id)
+	}
 	m.workers.Wait()
 	m.mu.Lock()
 	m.persistLocked()
@@ -851,11 +909,20 @@ func (m *ActivityManager) Close() {
 func (m *ActivityManager) Cancel(id string) error {
 	m.mu.Lock()
 	c := m.cancels[id]
-	m.mu.Unlock()
-	if c == nil {
+	if c == nil || m.closed {
+		m.mu.Unlock()
 		return errors.New("transfer is not active")
 	}
 	c()
+	pending := m.removePendingDownloadLocked(id)
+	if pending {
+		m.workers.Add(1)
+	}
+	m.mu.Unlock()
+	if pending {
+		defer m.workers.Done()
+		m.cancelPendingDownload(id)
+	}
 	return nil
 }
 
@@ -866,6 +933,14 @@ func (m *ActivityManager) ResolveConflict(id, policy string) error {
 		return errors.New("invalid conflict resolution policy")
 	}
 	m.mu.Lock()
+	if job := m.downloads[id]; job != nil && job.waiting && job.policy == "" && !m.closed {
+		job.policy = policy
+		if !job.running {
+			m.scheduleDownloadLocked(job)
+		}
+		m.mu.Unlock()
+		return nil
+	}
 	ch := m.conflicts[id]
 	delete(m.conflicts, id)
 	m.mu.Unlock()
@@ -1022,11 +1097,12 @@ func (m *ActivityManager) RecordDeploymentTransfer(deploymentID, connectionID in
 	}
 }
 
+const transferProgressInterval = 150 * time.Millisecond
+
 type countWriter struct {
 	w      io.Writer
 	n      int64
 	update func(int64)
-	lastN  int64
 	lastAt time.Time
 }
 
@@ -1034,9 +1110,9 @@ func (w *countWriter) Write(p []byte) (int, error) {
 	n, e := w.w.Write(p)
 	if n > 0 {
 		w.n += int64(n)
-		if w.update != nil && (w.n-w.lastN >= 512*1024 || time.Since(w.lastAt) >= 500*time.Millisecond) {
+		if w.update != nil && time.Since(w.lastAt) >= transferProgressInterval {
 			w.update(w.n)
-			w.lastN, w.lastAt = w.n, time.Now()
+			w.lastAt = time.Now()
 		}
 	}
 	return n, e
@@ -1046,7 +1122,6 @@ type countReader struct {
 	r      io.Reader
 	n      int64
 	update func(int64)
-	lastN  int64
 	lastAt time.Time
 }
 
@@ -1054,9 +1129,9 @@ func (r *countReader) Read(p []byte) (int, error) {
 	n, e := r.r.Read(p)
 	if n > 0 {
 		r.n += int64(n)
-		if r.update != nil && (r.n-r.lastN >= 512*1024 || time.Since(r.lastAt) >= 500*time.Millisecond) {
+		if r.update != nil && time.Since(r.lastAt) >= transferProgressInterval {
 			r.update(r.n)
-			r.lastN, r.lastAt = r.n, time.Now()
+			r.lastAt = time.Now()
 		}
 	}
 	return n, e
